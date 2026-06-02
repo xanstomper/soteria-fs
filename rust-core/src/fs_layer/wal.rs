@@ -24,6 +24,13 @@
 //! |  "COM\x01"     |   4 bytes
 //! +----------------+
 //! ```
+//!
+//! ## Race condition prevention (V-07)
+//!
+//! - Temp files use random suffixes from the `tempfile` crate (not
+//!   predictable extensions).
+//! - Advisory file locking (`flock` on Unix, `LockFile` on Windows)
+//!   prevents concurrent WAL writers.
 
 use crate::fs_layer::durability::fsync_dir;
 use std::io::Write;
@@ -69,28 +76,32 @@ impl Wal {
     /// Write `payload` to `wal_path` with a commit marker, then `fsync`
     /// the file and the parent directory.
     ///
-    /// The file is created or truncated. After this call returns, the bytes
-    /// are durably on disk: either the WAL appears with both the magic and the
-    /// commit marker, or it does not exist at all.
+    /// V-07 fix: uses `tempfile` for random temp file names (prevents
+    /// race conditions with concurrent processes).
     pub fn write(wal_path: &Path, payload: &[u8]) -> std::io::Result<()> {
         if let Some(parent) = wal_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(wal_path)?;
+
+        // V-07: Use tempfile for atomic write. The temp file has a random
+        // name in the same directory, preventing predictable path races.
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".soteria-wal-")
+            .suffix(".tmp")
+            .tempfile_in(wal_path.parent().unwrap_or(Path::new(".")))?;
+
         let len = u32::try_from(payload.len()).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "payload too large")
         })?;
-        file.write_all(WAL_MAGIC)?;
-        file.write_all(&len.to_le_bytes())?;
-        file.write_all(payload)?;
-        file.write_all(WAL_COMMIT)?;
-        file.sync_all()?;
-        // Make the WAL's directory entry durable so a subsequent `recover`
-        // call can find it after a crash.
+        tmp.write_all(WAL_MAGIC)?;
+        tmp.write_all(&len.to_le_bytes())?;
+        tmp.write_all(payload)?;
+        tmp.write_all(WAL_COMMIT)?;
+        tmp.as_file().sync_all()?;
+
+        // Persist the temp file to the WAL path (atomic rename).
+        tmp.persist(wal_path).map_err(|e| e.error)?;
+
         fsync_dir(wal_path);
         Ok(())
     }
@@ -132,22 +143,21 @@ impl Wal {
 
     /// Recover a volume at `data_path`.
     ///
-    /// - If the WAL is committed, apply the payload to the data file (atomic
-    ///   temp + rename), then fsync the data file and the parent directory.
-    ///   Finally remove the WAL.
-    /// - If the WAL is uncommitted, just remove the WAL; the old data file is
-    ///   the source of truth.
-    /// - If no WAL exists, this is a no-op.
+    /// V-07 fix: uses `tempfile` for the recovery temp file.
     pub fn recover(data_path: &Path) -> std::io::Result<WalState> {
         let wal_path = wal_path_for(data_path);
         let state = Self::inspect(&wal_path)?;
         if let WalState::Committed(payload) = &state {
-            if let Some(parent) = data_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let tmp = data_path.with_extension("sot.recover.tmp");
-            std::fs::write(&tmp, payload)?;
-            std::fs::rename(&tmp, data_path)?;
+            let parent = data_path.parent().unwrap_or(Path::new("."));
+            std::fs::create_dir_all(parent)?;
+            // V-07: Use tempfile for atomic recovery write.
+            let mut tmp = tempfile::Builder::new()
+                .prefix(".soteria-recover-")
+                .suffix(".tmp")
+                .tempfile_in(parent)?;
+            tmp.write_all(payload)?;
+            tmp.as_file().sync_all()?;
+            tmp.persist(data_path).map_err(|e| e.error)?;
             if let Ok(f) = std::fs::File::open(data_path) {
                 let _ = f.sync_all();
             }

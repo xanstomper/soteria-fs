@@ -42,17 +42,29 @@ pub fn run(config: &InstallConfig) -> Result<()> {
     std::fs::create_dir_all(install_dir)
         .with_context(|| format!("Failed to create {}", install_dir.display()))?;
 
-    // Step 2: Copy binary
+    // Step 2: Extract embedded binary
     println!("  [2/6] Installing soteriad...");
     let binary_name = if cfg!(windows) {
         "soteriad.exe"
     } else {
         "soteriad"
     };
-    let source = find_binary(binary_name)?;
     let dest = install_dir.join(binary_name);
-    std::fs::copy(&source, &dest)
-        .with_context(|| format!("Failed to copy {} to {}", source.display(), dest.display()))?;
+
+    // The soteriad binary is embedded in this installer at compile time.
+    // To build a bundled installer, run: ruby scripts/package.rb
+    // which compiles soteriad first, then builds the installer with
+    // SOTERIA_BINARY_PATH set to the release binary.
+    let embedded: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/soteriad_embedded"));
+    std::fs::write(&dest, embedded)
+        .with_context(|| format!("Failed to write {}", dest.display()))?;
+
+    // Make executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
 
     // Step 3: Create config directory
     println!("  [3/6] Setting up configuration...");

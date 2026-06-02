@@ -21,7 +21,7 @@
 //! specific code and root privileges.
 
 use blake3;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Maximum age of an intent token before it's rejected.
 const INTENT_WINDOW: Duration = Duration::from_secs(1);

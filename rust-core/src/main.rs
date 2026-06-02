@@ -118,6 +118,10 @@ enum Commands {
         block_size: usize,
         #[arg(long, default_value_t = false)]
         fast_kdf: bool,
+        /// Use paranoid KDF parameters (4 GiB memory, 5 iterations).
+        /// Single brute-force attempt requires ~4 GiB RAM and ~20 seconds.
+        #[arg(long, default_value_t = false)]
+        paranoid: bool,
     },
     /// Decrypt a Soteria volume back to plaintext. Use either `--passphrase`
     /// or `--key-file` (a 32-byte raw key, e.g. produced by `share unlock`).
@@ -473,6 +477,7 @@ fn main() -> anyhow::Result<()> {
             algorithm,
             block_size,
             fast_kdf,
+            paranoid,
         } => {
             let pw = match passphrase {
                 Some(p) => p,
@@ -483,6 +488,8 @@ fn main() -> anyhow::Result<()> {
             let path = backing_path_for(&into, &name);
             let params = if fast_kdf {
                 KdfParams::fast_test()
+            } else if paranoid {
+                KdfParams::paranoid()
             } else {
                 KdfParams::production()
             };

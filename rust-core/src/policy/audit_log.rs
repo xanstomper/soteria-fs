@@ -99,6 +99,10 @@ pub struct AuditLog {
     path: PathBuf,
     last_chain: [u8; 32],
     next_seq: u64,
+    /// Maximum log file size before rotation (default: 10 MB).
+    max_size: u64,
+    /// Maximum number of rotated logs to keep (default: 5).
+    max_rotations: usize,
 }
 
 impl AuditLog {
@@ -124,6 +128,8 @@ impl AuditLog {
                 path,
                 last_chain,
                 next_seq,
+                max_size: 10 * 1024 * 1024, // 10 MB
+                max_rotations: 5,
             },
             entries.len(),
         ))
@@ -162,6 +168,48 @@ impl AuditLog {
     /// Path of the underlying log file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Rotate the log if it exceeds the maximum size.
+    /// Returns `Ok(true)` if rotation occurred, `Ok(false)` otherwise.
+    pub fn rotate_if_needed(&mut self) -> std::io::Result<bool> {
+        let metadata = match std::fs::metadata(&self.path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if metadata.len() < self.max_size {
+            return Ok(false);
+        }
+        self.rotate()
+    }
+
+    /// Rotate the log. Moves the current log to `<path>.1`, shifts older
+    /// rotations, and starts a new empty log.
+    pub fn rotate(&mut self) -> std::io::Result<bool> {
+        // Shift existing rotations.
+        for i in (1..self.max_rotations).rev() {
+            let from = self.rotation_path(i);
+            let to = self.rotation_path(i + 1);
+            if from.exists() {
+                let _ = std::fs::rename(&from, &to);
+            }
+        }
+        // Move current log to .1
+        if self.path.exists() {
+            let rot1 = self.rotation_path(1);
+            std::fs::rename(&self.path, &rot1)?;
+        }
+        // Reset chain state.
+        self.last_chain = [0u8; 32];
+        self.next_seq = 0;
+        Ok(true)
+    }
+
+    fn rotation_path(&self, n: usize) -> PathBuf {
+        let mut s = self.path.as_os_str().to_owned();
+        s.push(format!(".{n}"));
+        PathBuf::from(s)
     }
 
     /// Verify the entire log file end-to-end. A missing log file is

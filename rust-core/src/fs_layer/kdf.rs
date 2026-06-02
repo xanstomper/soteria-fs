@@ -78,6 +78,27 @@ impl KdfParams {
             p_cost: 1,
         }
     }
+
+    /// High-security parameters: 1 GiB, 3 iterations, 1 lane.
+    /// ~1-5 seconds on a modern x86-64 core. Suitable for sensitive data.
+    pub const fn high_security() -> Self {
+        Self {
+            m_cost: 1_048_576, // 1 GiB
+            t_cost: 3,
+            p_cost: 1,
+        }
+    }
+
+    /// Paranoid parameters: 4 GiB, 5 iterations, 1 lane.
+    /// ~10-30 seconds on a modern x86-64 core. For high-risk environments.
+    /// A single brute-force attempt requires 4 GiB of RAM and ~20 seconds.
+    pub const fn paranoid() -> Self {
+        Self {
+            m_cost: 4_194_304, // 4 GiB
+            t_cost: 5,
+            p_cost: 1,
+        }
+    }
 }
 
 impl Default for KdfParams {

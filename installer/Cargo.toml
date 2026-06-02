@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Soteria Aegis installer"
+build = "build.rs"
 
 [[bin]]
 name = "SoteriaAegis-Setup"
