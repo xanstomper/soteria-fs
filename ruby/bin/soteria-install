@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../lib/soteria"
+
+# Soteria Installer — guided setup wizard.
+# Runs system checks, configures security mode, generates recovery keys.
+puts "Soteria Installer v#{Soteria::VERSION}"
+puts
+
+installer = Soteria::Installer.new
+installer.run_setup

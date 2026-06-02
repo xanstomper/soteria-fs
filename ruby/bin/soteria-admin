@@ -1,0 +1,40 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "thor"
+require_relative "../lib/soteria"
+
+module Soteria
+  class AdminCLI < Thor
+    desc "status", "Show system status"
+    def status
+      Soteria::Admin.new.status
+    end
+
+    desc "health DIR", "Run health check on volumes"
+    def health(dir)
+      Soteria::Admin.new.health_check(dir)
+    end
+
+    desc "export-audit LOG OUTPUT", "Export audit log to file"
+    def export_audit(log, output)
+      Soteria::Admin.new.export_audit(log, output)
+    end
+
+    desc "key-report", "Show key lifecycle report"
+    def key_report
+      Soteria::Admin.new.key_report
+    end
+
+    desc "batch-encrypt DIR INTO PASSPHRASE", "Batch encrypt all files in a directory"
+    option :fast_kdf, type: :boolean, default: false
+    def batch_encrypt(dir, into, passphrase)
+      files = Dir.glob(File.join(dir, "*")).select { |f| File.file?(f) }
+      Soteria::Admin.new.batch_encrypt(files, into: into,
+                                       passphrase: passphrase,
+                                       fast_kdf: options[:fast_kdf])
+    end
+  end
+end
+
+Soteria::AdminCLI.start(ARGV)

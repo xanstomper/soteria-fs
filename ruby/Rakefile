@@ -1,0 +1,36 @@
+# frozen_string_literal: true
+
+require "rake"
+
+desc "Run all Ruby specs"
+task :spec do
+  sh "bundle exec rspec --format documentation"
+end
+
+desc "Run RuboCop linting"
+task :rubocop do
+  sh "bundle exec rubocop"
+end
+
+desc "Build the gem"
+task :build do
+  sh "gem build soteria.gemspec"
+end
+
+desc "Install the gem locally"
+task :install => :build do
+  sh "gem install soteria-#{Soteria::VERSION}.gem"
+end
+
+desc "Build the Rust core"
+task :rust do
+  sh "cd ../rust-core && cargo build --release"
+end
+
+desc "Build everything (Rust + Ruby)"
+task :all => [:rust, :build]
+
+desc "Run full CI suite"
+task :ci => [:rubocop, :spec]
+
+task default: :spec
