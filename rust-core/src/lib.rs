@@ -5,6 +5,7 @@ pub mod crypto_engine;
 pub mod daemon;
 pub mod deception;
 pub mod deception_layer;
+pub mod defense;
 pub mod enterprise;
 pub mod event_bus;
 pub mod fs_layer;
