@@ -8,6 +8,7 @@ pub mod deception_layer;
 pub mod enterprise;
 pub mod event_bus;
 pub mod fs_layer;
+pub mod intrusion;
 pub mod key_manager;
 pub mod policy;
 pub mod response_engine;
