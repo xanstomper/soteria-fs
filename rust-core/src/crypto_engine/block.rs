@@ -77,23 +77,19 @@ pub fn build_block_salt(block_index: u64, lineage_prev: &str) -> [u8; 40] {
 
 /// Reduce a lineage_prev string (either the literal "GENESIS" or a 64-char
 /// hex BLAKE3 digest) to the 32 bytes used in the HKDF salt.
+///
+/// V-02 fix: strict validation — fail on invalid hex instead of silently
+/// accepting garbage.
 pub fn lineage_prev_salt(lineage_prev: &str) -> [u8; 32] {
     if lineage_prev == "GENESIS" {
-        *blake3::hash(b"GENESIS").as_bytes()
-    } else {
-        let mut out = [0u8; 32];
-        let bytes = lineage_prev.as_bytes();
-        let mut i = 0;
-        let mut j = 0;
-        while i + 1 < bytes.len() && j < 32 {
-            if let Ok(b) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i..i + 2]).unwrap_or("00"), 16)
-            {
-                out[j] = b;
-            }
-            i += 2;
-            j += 1;
-        }
-        out
+        return *blake3::hash(b"GENESIS").as_bytes();
     }
+    assert!(
+        lineage_prev.len() == 64,
+        "lineage_prev must be 64 hex chars (got {})",
+        lineage_prev.len()
+    );
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(lineage_prev, &mut out).expect("lineage_prev must be valid 64-char hex");
+    out
 }

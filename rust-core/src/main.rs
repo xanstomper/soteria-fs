@@ -14,6 +14,24 @@ use soteria_core::response_engine::{PolicyEngine, ResponseContext};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Read a passphrase securely. Never from argv (V-03 fix).
+///
+/// Priority:
+///   1. SOTERIA_PASSPHRASE env var (if set)
+///   2. Interactive terminal prompt (echo disabled)
+///
+/// The returned string is NOT zeroized (rpassword doesn't support it),
+/// but it's never stored in argv or shell history.
+fn read_passphrase(prompt: &str) -> anyhow::Result<String> {
+    // Check env var first (useful for scripts/testing).
+    if let Ok(pw) = std::env::var("SOTERIA_PASSPHRASE") {
+        return Ok(pw);
+    }
+    // Interactive prompt with echo disabled.
+    let pw = rpassword::prompt_password(prompt)?;
+    Ok(pw)
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "soteriad", about = "Soteria FS deterministic security daemon")]
 struct Cli {
@@ -81,6 +99,9 @@ enum Commands {
     },
     /// Encrypt a file into a Soteria volume directory using a passphrase.
     /// Writes `<dir>/<name>.sot` and a `.sot.kdf` sidecar.
+    ///
+    /// V-03: Passphrase is read from stdin if not provided via --passphrase.
+    /// NEVER pass passphrases as CLI arguments (visible in process listing).
     Encrypt {
         #[arg(long)]
         src: PathBuf,
@@ -88,8 +109,9 @@ enum Commands {
         into: PathBuf,
         #[arg(long)]
         name: String,
+        /// Passphrase (optional; if omitted, read securely from stdin).
         #[arg(long)]
-        passphrase: String,
+        passphrase: Option<String>,
         #[arg(long, value_enum, default_value_t = AlgoArg::XChaCha)]
         algorithm: AlgoArg,
         #[arg(long, default_value_t = 65536)]
@@ -452,6 +474,10 @@ fn main() -> anyhow::Result<()> {
             block_size,
             fast_kdf,
         } => {
+            let pw = match passphrase {
+                Some(p) => p,
+                None => read_passphrase("Enter passphrase: ")?,
+            };
             let plaintext = std::fs::read(&src)?;
             std::fs::create_dir_all(&into)?;
             let path = backing_path_for(&into, &name);
@@ -465,7 +491,7 @@ fn main() -> anyhow::Result<()> {
                 algorithm.clone().into(),
                 params,
                 block_size,
-                passphrase.as_bytes(),
+                pw.as_bytes(),
                 &plaintext,
             )?;
             println!(

@@ -1,13 +1,17 @@
 # Rust
-rust-core/target/
-installer/target/
+**/target/
 **/*.rs.bk
 Cargo.lock
 
 # Ruby
-ui/vendor/
-ui/.bundle/
-ui/tmp/
+ruby/vendor/
+ruby/.bundle/
+ruby/tmp/
+
+# Desktop app
+desktop/target/
+desktop/dist/
+desktop/node_modules/
 
 # OS
 .DS_Store
@@ -26,6 +30,7 @@ Thumbs.db
 *.deb
 *.rpm
 *.pkg
+*.exe
 
 # Test artifacts
 *.sot

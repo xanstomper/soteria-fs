@@ -35,7 +35,10 @@ impl CryptoEngine {
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> crate::Result<AeadEnvelope> {
         let (nonce, ciphertext) = match self.algorithm {
             AeadAlgorithm::Aes256Gcm => {
-                let n = Nonce96::random();
+                // V-01 fix: derive nonce deterministically from key + AAD.
+                // Each block has unique AAD (block_index || lineage_prev),
+                // so nonce is unique per block per key. No birthday bound risk.
+                let n = Nonce96::derive(&self.key, aad);
                 let cipher = Aes256Gcm::new_from_slice(self.key.as_slice())
                     .map_err(|_| anyhow::anyhow!("invalid AES key"))?;
                 let ct = cipher

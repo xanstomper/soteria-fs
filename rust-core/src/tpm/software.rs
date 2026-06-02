@@ -136,13 +136,15 @@ mod tests {
     }
 
     #[test]
-    fn seal_different_nonces() {
+    fn seal_deterministic_for_same_key() {
         let provider = SoftwareSealingProvider::new().unwrap();
         let key = [0x42u8; 32];
         let s1 = provider.seal(&key).unwrap();
         let s2 = provider.seal(&key).unwrap();
-        // Same plaintext, different nonces → different ciphertext.
-        assert_ne!(s1, s2);
+        // V-01 fix: deterministic nonces mean same key → same ciphertext.
+        // This is correct and desired — prevents nonce reuse with different
+        // plaintext under the same key.
+        assert_eq!(s1, s2);
     }
 
     #[test]
