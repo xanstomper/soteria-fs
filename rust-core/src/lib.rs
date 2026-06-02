@@ -1,3 +1,4 @@
+pub mod advanced;
 pub mod ai_observer;
 pub mod anti_forensic;
 pub mod config;
