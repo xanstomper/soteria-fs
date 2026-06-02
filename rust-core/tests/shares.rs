@@ -413,10 +413,18 @@ fn envelope_signature_payload_is_canonical_and_stable() {
         envelope,
         owner_signature,
         owner_sig_pk_id,
+        at_unix_ms,
         ..
     } = ev2
     {
-        let payload = envelope_signing_payload(recipient_key_id, recipient_pk_bytes, envelope);
+        // PATCH-07: Full signature scope includes timestamp and event index.
+        let payload = envelope_signing_payload(
+            recipient_key_id,
+            recipient_pk_bytes,
+            envelope,
+            *at_unix_ms,
+            0, // event index
+        );
         // The domain separator must be the first bytes.
         assert!(payload.starts_with(ENVELOPE_SIGN_DOMAIN));
         // The signature over this payload must verify with the owner PK.

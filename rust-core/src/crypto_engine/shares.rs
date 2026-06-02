@@ -109,6 +109,12 @@ pub struct ShareFile {
     #[serde(with = "hex_32")]
     pub volume_root_key_fingerprint: [u8; 32],
     pub events: Vec<ShareEvent>,
+    /// PATCH-06: BLAKE3 chain hash per event. Prevents event reordering
+    /// and rollback. Each entry is `BLAKE3(prev_chain || event_bytes)`.
+    /// The chain protects against an attacker who has write access to
+    /// the share file reordering, removing, or replaying events.
+    #[serde(default)]
+    pub chain: Vec<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,8 +139,16 @@ pub struct DecryptedShare {
 }
 
 /// A single active envelope together with its ML-DSA-65 signature metadata.
-/// Tuple layout: `(PublicKey, key_id, KeyEnvelope, owner_sig_pk_id, owner_signature)`.
-pub type SignedEnvelope = (PublicKey, [u8; 32], KeyEnvelope, [u8; 32], Vec<u8>);
+/// Tuple layout: `(PublicKey, key_id, KeyEnvelope, owner_sig_pk_id, owner_signature, at_unix_ms, event_index)`.
+pub type SignedEnvelope = (
+    PublicKey,
+    [u8; 32],
+    KeyEnvelope,
+    [u8; 32],
+    Vec<u8>,
+    u64,
+    u64,
+);
 
 impl ShareFile {
     /// Build a fresh, empty share file for a volume with the given root key.
@@ -143,6 +157,7 @@ impl ShareFile {
             version: SHARES_VERSION,
             volume_root_key_fingerprint: *blake3::hash(root_key).as_bytes(),
             events: Vec::new(),
+            chain: Vec::new(),
         }
     }
 
@@ -211,10 +226,15 @@ impl ShareFile {
             );
         }
         let envelope = wrap_key(root_key, recipient_pk)?;
-        // The owner signs the canonical envelope bytes. The signing payload
-        // covers recipient key id, recipient ML-KEM-768 PK, and every field
-        // of the envelope so any tampering is detected.
-        let payload = envelope_signing_payload(&key_id, &recipient_pk.bytes, &envelope);
+        // PATCH-07: Full signature scope includes timestamp and event index.
+        let event_index = self.events.len() as u64;
+        let payload = envelope_signing_payload(
+            &key_id,
+            &recipient_pk.bytes,
+            &envelope,
+            now_unix_ms,
+            event_index,
+        );
         let signature = dsa::sign(&payload, owner_sk)?;
         // Derive the owner key id from the secret key's corresponding public
         // key. The dsa module doesn't expose the public key derived from a
@@ -231,6 +251,8 @@ impl ShareFile {
             owner_signature: signature,
             at_unix_ms: now_unix_ms,
         });
+        // PATCH-06: Append chain hash for this event.
+        self.append_chain_hash();
         Ok(key_id)
     }
 
@@ -255,6 +277,8 @@ impl ShareFile {
                 at_unix_ms: now_unix_ms,
                 reason: reason.to_string(),
             });
+            // PATCH-06: Append chain hash for this event.
+            self.append_chain_hash();
             return Ok(true);
         }
         let was_revoked = self.events.iter().any(
@@ -264,6 +288,37 @@ impl ShareFile {
             anyhow::bail!("share: recipient is already revoked");
         }
         Ok(false)
+    }
+
+    /// Append a chain hash for the latest event (PATCH-06).
+    fn append_chain_hash(&mut self) {
+        let prev = self.chain.last().copied().unwrap_or([0u8; 32]);
+        let event = self.events.last().unwrap();
+        let event_bytes = serde_json::to_vec(event).unwrap_or_default();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"soteria:share-chain:v1");
+        hasher.update(&prev);
+        hasher.update(&event_bytes);
+        self.chain.push(*hasher.finalize().as_bytes());
+    }
+
+    /// Verify the chain integrity. Returns the index of the first bad
+    /// event, or None if the chain is valid.
+    pub fn verify_chain(&self) -> Option<usize> {
+        let mut prev = [0u8; 32];
+        for (i, event) in self.events.iter().enumerate() {
+            let event_bytes = serde_json::to_vec(event).unwrap_or_default();
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"soteria:share-chain:v1");
+            hasher.update(&prev);
+            hasher.update(&event_bytes);
+            let expected = *hasher.finalize().as_bytes();
+            if i < self.chain.len() && self.chain[i] != expected {
+                return Some(i);
+            }
+            prev = expected;
+        }
+        None
     }
 
     /// Unwrap the volume root key using the recipient's secret key. Tries
@@ -280,7 +335,9 @@ impl ShareFile {
         owner_pk: Option<&OwnerPublicKey>,
     ) -> crate::Result<DecryptedShare> {
         let mut owner_id_checked = false;
-        for (pk, kid, env, sig_pk_id, signature) in self.active_envelopes_with_signatures() {
+        for (pk, kid, env, sig_pk_id, signature, at_unix_ms, event_idx) in
+            self.active_envelopes_with_signatures()
+        {
             // Signature verification is only attempted when the caller
             // supplied an owner PK. Otherwise the signature is recorded in
             // the event but not checked (caller opted out).
@@ -294,7 +351,9 @@ impl ShareFile {
                     continue;
                 }
                 owner_id_checked = true;
-                let payload = envelope_signing_payload(&kid, &pk.bytes, &env);
+                // PATCH-07: Full signature scope includes timestamp and event index.
+                let payload =
+                    envelope_signing_payload(&kid, &pk.bytes, &env, at_unix_ms, event_idx);
                 if dsa::verify(&payload, &signature, opk).is_err() {
                     anyhow::bail!(
                         "share unlock: envelope signature failed verification for recipient key {}",
@@ -328,7 +387,7 @@ impl ShareFile {
     pub fn active_envelopes(&self) -> Vec<(PublicKey, [u8; 32], KeyEnvelope)> {
         self.active_envelopes_with_signatures()
             .into_iter()
-            .map(|(pk, kid, env, _, _)| (pk, kid, env))
+            .map(|(pk, kid, env, _, _, _, _)| (pk, kid, env))
             .collect()
     }
 
@@ -339,7 +398,7 @@ impl ShareFile {
         let latest = latest_state_per_recipient(&self.events);
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for ev in &self.events {
+        for (event_idx, ev) in self.events.iter().enumerate() {
             let kid = match ev {
                 ShareEvent::Added {
                     recipient_key_id, ..
@@ -357,6 +416,7 @@ impl ShareFile {
                 envelope,
                 owner_sig_pk_id,
                 owner_signature,
+                at_unix_ms,
                 ..
             }) = candidate
             {
@@ -371,6 +431,8 @@ impl ShareFile {
                     KeyEnvelope::clone(envelope),
                     *owner_sig_pk_id,
                     owner_signature.clone(),
+                    *at_unix_ms,
+                    event_idx as u64,
                 ));
                 seen.insert(kid);
             }
@@ -439,7 +501,7 @@ fn event_key_id(ev: &ShareEvent) -> Option<[u8; 32]> {
 /// owner's ML-DSA-65 public key.
 ///
 /// Format: `domain || recipient_key_id || recipient_ml_kem_pk || wrap_nonce
-/// || kem_ciphertext || wrapped_key`.
+/// || kem_ciphertext || wrapped_key || at_unix_ms || event_index`.
 ///
 /// Every field of the envelope is bound to the signature, so any tampering
 /// (key id swap, KEM ciphertext modification, wrapped key swap, nonce
@@ -448,6 +510,8 @@ pub fn envelope_signing_payload(
     recipient_key_id: &[u8; 32],
     recipient_pk_bytes: &[u8],
     envelope: &KeyEnvelope,
+    at_unix_ms: u64,
+    event_index: u64,
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(
         ENVELOPE_SIGN_DOMAIN.len()
@@ -455,7 +519,9 @@ pub fn envelope_signing_payload(
             + recipient_pk_bytes.len()
             + envelope.wrap_nonce.len()
             + envelope.kem_ciphertext.len()
-            + envelope.wrapped_key.len(),
+            + envelope.wrapped_key.len()
+            + 8
+            + 8,
     );
     buf.extend_from_slice(ENVELOPE_SIGN_DOMAIN);
     buf.extend_from_slice(recipient_key_id);
@@ -463,6 +529,9 @@ pub fn envelope_signing_payload(
     buf.extend_from_slice(&envelope.wrap_nonce);
     buf.extend_from_slice(&envelope.kem_ciphertext);
     buf.extend_from_slice(&envelope.wrapped_key);
+    // PATCH-07: Bind timestamp and event index to the signature.
+    buf.extend_from_slice(&at_unix_ms.to_le_bytes());
+    buf.extend_from_slice(&event_index.to_le_bytes());
     buf
 }
 
