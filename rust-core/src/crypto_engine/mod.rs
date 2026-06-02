@@ -4,6 +4,7 @@ pub mod dsa;
 pub mod kdf;
 pub mod nonce;
 pub mod pq;
+pub mod secure_box;
 pub mod shares;
 
 pub use aead::{AeadAlgorithm, CryptoEngine};

@@ -64,6 +64,8 @@ const ALG_XCHACHA: u8 = 1;
 const ALG_AES_GCM: u8 = 2;
 const HEADER_INTEGRITY_OFFSET: usize = 80;
 const HEADER_INTEGRITY_SIZE: usize = 32;
+const KDF_HASH_OFFSET: usize = 112;
+const KDF_HASH_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VolumeError {
@@ -101,6 +103,10 @@ pub struct OnDiskFile {
     pub algorithm: AeadAlgorithm,
     pub index: Vec<BlockIndexEntry>,
     pub ciphertext: Vec<u8>,
+    /// BLAKE3 hash of the KDF sidecar file. Stored in the volume header
+    /// to prevent KDF sidecar swapping attacks (PATCH-05).
+    #[serde(default)]
+    pub kdf_hash: Option<[u8; 32]>,
 }
 
 impl OnDiskFile {
@@ -124,6 +130,10 @@ impl OnDiskFile {
         let integrity = blake3::hash(&header[..HEADER_INTEGRITY_OFFSET]);
         header[HEADER_INTEGRITY_OFFSET..HEADER_INTEGRITY_OFFSET + HEADER_INTEGRITY_SIZE]
             .copy_from_slice(integrity.as_bytes());
+        // PATCH-05: Write KDF sidecar hash to header.
+        if let Some(kdf_hash) = &self.kdf_hash {
+            header[KDF_HASH_OFFSET..KDF_HASH_OFFSET + KDF_HASH_SIZE].copy_from_slice(kdf_hash);
+        }
         buf.extend_from_slice(&header);
         for entry in &self.index {
             buf.extend_from_slice(&entry.block_index.to_le_bytes());
@@ -169,6 +179,17 @@ impl OnDiskFile {
         if stored != computed.as_bytes() {
             anyhow::bail!("volume: header integrity check failed");
         }
+        // PATCH-05: Read KDF sidecar hash from header.
+        let kdf_hash = {
+            let hash_bytes = &bytes[KDF_HASH_OFFSET..KDF_HASH_OFFSET + KDF_HASH_SIZE];
+            if hash_bytes.iter().all(|&b| b == 0) {
+                None
+            } else {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(hash_bytes);
+                Some(h)
+            }
+        };
 
         let index_size = block_count * INDEX_ENTRY_SIZE;
         if bytes.len() < HEADER_SIZE + index_size {
@@ -200,6 +221,7 @@ impl OnDiskFile {
             algorithm: alg,
             index,
             ciphertext,
+            kdf_hash,
         })
     }
 
@@ -375,6 +397,7 @@ pub fn encrypt_to_disk(
         algorithm,
         index,
         ciphertext,
+        kdf_hash: None,
     })
 }
 
