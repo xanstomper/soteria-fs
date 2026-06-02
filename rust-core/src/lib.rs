@@ -1,4 +1,5 @@
 pub mod ai_observer;
+pub mod anti_forensic;
 pub mod config;
 pub mod crypto_engine;
 pub mod daemon;
