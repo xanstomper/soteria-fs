@@ -1,0 +1,33 @@
+[crypto]
+algorithm = "xchacha20-poly1305"
+block_size = 65536
+argon2_memory_kib = 262144
+argon2_iterations = 3
+
+[key_lifecycle]
+session_ttl_seconds = 300
+ratchet_every_events = 50
+enforce_zeroize = true
+
+[event_bus]
+append_only_log = "./.soteria/events.log"
+chain_events_with_blake3 = true
+
+[response]
+entropy_spike_threshold = 0.85
+write_rate_threshold_per_minute = 120
+rename_rate_threshold_per_minute = 40
+allowed_actions = ["FREEZE", "ISOLATE", "REVOKE", "ROLLBACK"]
+
+[snapshot]
+root = "./.soteria/snapshots"
+cow_enabled = true
+verify_blake3 = true
+
+[ai_observer]
+enabled = true
+read_only = true
+
+[deception]
+enabled = false
+decoy_root = "./.soteria/decoys"

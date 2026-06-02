@@ -1,0 +1,136 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Format and lint gate. Runs on a single fast Ubuntu runner to fail PRs
+  # cheaply before the more expensive test matrix.
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Check formatting
+        working-directory: rust-core
+        run: cargo fmt --check
+      - name: Clippy (deny warnings)
+        working-directory: rust-core
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build release
+        working-directory: rust-core
+        run: cargo build --release --locked
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Run unit tests
+        working-directory: rust-core
+        run: cargo test --all-targets
+
+  # Linux-only: build with the FUSE feature to make sure the feature-gated
+  # code path still compiles. FUSE cannot be exercised in CI without a real
+  # filesystem mount, but the build itself is a meaningful check.
+  fuse-build:
+    name: build (fuse feature)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux FUSE build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev pkg-config
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Build with FUSE feature
+        working-directory: rust-core
+        run: cargo build --features fuse --locked
+
+  # Verify the CLI smoke-tests end-to-end on each platform. This catches
+  # regressions in the binary surface even when all unit tests pass.
+  cli-smoke:
+    name: cli smoke (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Build release binary
+        working-directory: rust-core
+        run: cargo build --release --locked
+      - name: status subcommand
+        working-directory: rust-core
+        run: ./target/release/soteriad status --config ../config/soteria.toml
+      - name: encrypt + decrypt round-trip
+        working-directory: rust-core
+        shell: bash
+        run: |
+          set -e
+          TMP=$(mktemp -d)
+          echo "hello, soteria" > "$TMP/in.txt"
+          mkdir -p "$TMP/vault"
+          ./target/release/soteriad encrypt \
+            --src "$TMP/in.txt" --into "$TMP/vault" --name hello \
+            --passphrase "test" --fast-kdf
+          ./target/release/soteriad decrypt \
+            --from "$TMP/vault" --name hello \
+            --passphrase "test" --output "$TMP/out.txt"
+          diff "$TMP/in.txt" "$TMP/out.txt"
+      - name: keygen + share add
+        working-directory: rust-core
+        shell: bash
+        run: |
+          set -e
+          TMP=$(mktemp -d)
+          echo "x" > "$TMP/in.txt"
+          mkdir -p "$TMP/vault"
+          ./target/release/soteriad encrypt \
+            --src "$TMP/in.txt" --into "$TMP/vault" --name x \
+            --passphrase "p" --fast-kdf
+          ./target/release/soteriad keygen --out "$TMP/alice"
+          ./target/release/soteriad share add \
+            --volume "$TMP/vault/x.sot" --passphrase "p" \
+            --recipient-pk "$TMP/alice.pk"
+          ./target/release/soteriad share list \
+            --volume "$TMP/vault/x.sot" --passphrase "p" | grep '"active_count": 1'

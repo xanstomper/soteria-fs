@@ -1,0 +1,60 @@
+<% @page_title = "Recovery Setup" %>
+
+<div class="max-w-2xl mx-auto space-y-8 fade-in">
+  <div class="flex items-center justify-between">
+    <div class="wizard-step"><div class="step-number complete">1</div><span class="text-sm text-soteria-green">Welcome</span></div>
+    <div class="flex-1 h-px bg-soteria-green mx-3"></div>
+    <div class="wizard-step"><div class="step-number complete">2</div><span class="text-sm text-soteria-green">Scan</span></div>
+    <div class="flex-1 h-px bg-soteria-green mx-3"></div>
+    <div class="wizard-step"><div class="step-number complete">3</div><span class="text-sm text-soteria-green">Mode</span></div>
+    <div class="flex-1 h-px bg-soteria-green mx-3"></div>
+    <div class="wizard-step"><div class="step-number active">4</div><span class="text-sm font-medium">Recovery</span></div>
+    <div class="flex-1 h-px bg-surface-border mx-3"></div>
+    <div class="wizard-step"><div class="step-number pending">5</div><span class="text-sm text-[#5A5A6E]">Protect</span></div>
+  </div>
+
+  <div class="card">
+    <h2 class="text-lg font-semibold mb-2">Your Recovery Key</h2>
+    <p class="text-sm text-[#8B8B9E] mb-6">
+      Your recovery key is the only way to access your files if you forget your password.
+      It is not stored on your device. You will be asked to save it in one or more of the following ways.
+    </p>
+
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <div class="p-4 rounded-card border border-surface-border cursor-pointer hover:border-soteria-accent/30 transition-colors">
+        <i data-lucide="usb" class="w-6 h-6 text-soteria-accent mb-2"></i>
+        <div class="font-medium text-sm mb-1">USB Key</div>
+        <div class="text-xs text-[#8B8B9E]">Save to a USB drive. Best for a physical backup in a safe place.</div>
+      </div>
+      <div class="p-4 rounded-card border border-surface-border cursor-pointer hover:border-soteria-accent/30 transition-colors">
+        <i data-lucide="printer" class="w-6 h-6 text-soteria-accent mb-2"></i>
+        <div class="font-medium text-sm mb-1">Printed Sheet</div>
+        <div class="text-xs text-[#8B8B9E]">Print a recovery sheet. Best for a safe or filing cabinet.</div>
+      </div>
+      <div class="p-4 rounded-card border border-surface-border cursor-pointer hover:border-soteria-accent/30 transition-colors">
+        <i data-lucide="file-lock" class="w-6 h-6 text-soteria-accent mb-2"></i>
+        <div class="font-medium text-sm mb-1">Encrypted Backup</div>
+        <div class="text-xs text-[#8B8B9E]">Save an encrypted file to cloud or external drive.</div>
+      </div>
+    </div>
+
+    <div class="p-4 rounded-card bg-soteria-amber/5 border border-soteria-amber/20 mb-6">
+      <div class="flex items-start gap-2">
+        <i data-lucide="info" class="w-4 h-4 text-soteria-amber mt-0.5 flex-shrink-0"></i>
+        <div class="text-sm">
+          <div class="font-medium text-soteria-amber mb-1">What if I lose my recovery key?</div>
+          <p class="text-[#8B8B9E]">Without a recovery key, forgetting your password means losing access to your files permanently.
+          This is by design — it means no one else can recover them either. Save at least two copies.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex justify-between">
+      <a href="/installer/mode" class="btn btn-secondary">Back</a>
+      <a href="/installer/preview" class="btn btn-primary">
+        Continue
+        <i data-lucide="arrow-right" class="w-4 h-4"></i>
+      </a>
+    </div>
+  </div>
+</div>

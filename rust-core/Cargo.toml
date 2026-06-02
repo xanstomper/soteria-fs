@@ -1,0 +1,55 @@
+[package]
+name = "soteria-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Soteria FS Rust core: deterministic self-defending encrypted filesystem scaffold"
+
+[[bin]]
+name = "soteriad"
+path = "src/main.rs"
+
+[features]
+default = []
+fuse = ["dep:fuser"]
+pqc-oqs = [] # reserved for liboqs-backed ML-KEM; pure-Rust ml-kem is the default
+tpm = ["dep:tss-esapi"] # real TPM2 backend via TCG Software Stack
+
+[dependencies]
+anyhow = "1.0"
+aes-gcm = "0.10"
+argon2 = "0.5"
+axum = "0.8"
+blake3 = "1.5"
+chacha20poly1305 = "0.10"
+clap = { version = "4.5", features = ["derive", "env"] }
+ctrlc = "3.4"
+fuser = { version = "0.14", optional = true }
+hex = "0.4"
+hkdf = "0.12"
+hostname = "0.4"
+libc = "0.2"
+ml-dsa = { version = "0.1", features = ["getrandom"] }
+ml-kem = { version = "0.3", features = ["getrandom"] }
+parking_lot = "0.12"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.42", features = ["full"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
+tss-esapi = { version = "7.5", optional = true }
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+criterion = { version = "0.5", features = ["html_reports"] }
+predicates = "3.1.4"
+tempfile = "3.10"
+
+[[bench]]
+name = "crypto_bench"
+harness = false

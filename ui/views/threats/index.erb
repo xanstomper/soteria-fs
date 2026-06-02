@@ -1,0 +1,100 @@
+<% @page_title = "Threat Center" %>
+
+<div class="space-y-8 fade-in">
+  <!-- Threat summary cards -->
+  <div class="grid grid-cols-3 gap-4">
+    <div class="stat-card">
+      <div class="label">Active Threats</div>
+      <div class="value" style="color: <%= (@threat_summary["active_threats"] || 0) > 0 ? "#F87171" : "#34D399" %>">
+        <%= @threat_summary["active_threats"] || 0 %>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Canary Hits</div>
+      <div class="value" style="color: <%= (@canary["hits"] || 0) > 0 ? "#FBBF24" : "#34D399" %>">
+        <%= @canary["hits"] || 0 %>
+      </div>
+      <div class="text-xs text-[#5A5A6E] mt-1">
+        <% if @canary["active"] %>
+          <span class="text-soteria-green">Monitoring active</span>
+        <% else %>
+          <span class="text-[#5A5A6E]">Inactive</span>
+        <% end %>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Decoy Interactions</div>
+      <div class="value" style="color: <%= (@honey["interactions"] || 0) > 0 ? "#FBBF24" : "#34D399" %>">
+        <%= @honey["interactions"] || 0 %>
+      </div>
+      <div class="text-xs text-[#5A5A6E] mt-1">
+        <% if @honey["active"] %>
+          <span class="text-soteria-green">Honeypot active</span>
+        <% else %>
+          <span class="text-[#5A5A6E]">Inactive</span>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="border-b border-surface-border">
+    <div class="flex gap-4">
+      <a href="/threats" class="tab<%= ' active' if request.path == '/threats' %>">Overview</a>
+      <a href="/threats/events" class="tab<%= ' active' if request.path == '/threats/events' %>">Events</a>
+      <a href="/threats/deception" class="tab<%= ' active' if request.path == '/threats/deception' %>">Deception Layer</a>
+      <a href="/threats/anomalies" class="tab<%= ' active' if request.path == '/threats/anomalies' %>">Anomalies</a>
+      <a href="/audit" class="tab<%= ' active' if request.path == '/audit' %>">Audit Log</a>
+    </div>
+  </div>
+
+  <!-- Events -->
+  <div class="card">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-semibold">Recent Events</h3>
+      <div class="flex gap-2">
+        <select class="input w-auto text-xs" onchange="window.location.href='/threats?severity='+this.value">
+          <option value="">All severities</option>
+          <option value="critical" <%= 'selected' if params[:severity] == 'critical' %>>Critical</option>
+          <option value="warning" <%= 'selected' if params[:severity] == 'warning' %>>Warning</option>
+          <option value="info" <%= 'selected' if params[:severity] == 'info' %>>Info</option>
+        </select>
+      </div>
+    </div>
+    <div class="space-y-1">
+      <% if @events["events"]&.any? %>
+        <% @events["events"].each do |event| %>
+          <a href="/threats/events/<%= event['id'] %>" class="event-card block">
+            <div class="flex-shrink-0 mt-0.5">
+              <%
+                sev = event["severity"].to_s.downcase
+                icon_color = case sev
+                when "critical", "high" then "text-soteria-red"
+                when "warning", "medium" then "text-soteria-amber"
+                when "info", "low" then "text-soteria-blue"
+                else "text-[#5A5A6E]"
+                end
+              %>
+              <i data-lucide="<%= severity_icon(sev) %>" class="w-4 h-4 <%= icon_color %>"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-sm"><%= h(event["message"] || event["event_type"]) %></span>
+                <span class="severity-badge <%= sev %>"><%= sev.capitalize %></span>
+              </div>
+              <div class="text-xs text-[#5A5A6E] mt-1">
+                <%= event["source"] %> · <%= relative_time(event["timestamp"]) %>
+              </div>
+            </div>
+          </a>
+        <% end %>
+      <% else %>
+        <div class="text-center py-12 text-[#5A5A6E]">
+          <i data-lucide="shield-check" class="w-12 h-12 mx-auto mb-3 text-soteria-green"></i>
+          <div class="text-sm font-medium">No events</div>
+          <div class="text-xs mt-1">Soteria is monitoring your system in the background.</div>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</div>

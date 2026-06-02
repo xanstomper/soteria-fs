@@ -1,0 +1,80 @@
+<% @page_title = "Key Management" %>
+
+<div class="space-y-8 fade-in">
+  <!-- Key health summary -->
+  <div class="card">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-semibold">Key Health</h3>
+      <button hx-post="/keys/rotate" hx-confirm="Rotate all keys now?"
+              class="btn btn-secondary text-xs">
+        <i data-lucide="refresh-cw" class="w-3 h-3"></i>
+        Rotate Keys
+      </button>
+    </div>
+    <div class="grid grid-cols-3 gap-6">
+      <div>
+        <div class="text-xs text-[#5A5A6E] uppercase tracking-wider mb-2">Rotation Status</div>
+        <div class="text-lg font-semibold" style="color: <%= (@keys["rotation_health"] == "healthy") ? '#34D399' : '#FBBF24' %>">
+          <%= (@keys["rotation_health"] || "Unknown").capitalize %>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-[#5A5A6E] uppercase tracking-wider mb-2">Next Rotation</div>
+        <div class="text-lg font-semibold">
+          <%= @keys["next_rotation"] || "Not scheduled" %>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-[#5A5A6E] uppercase tracking-wider mb-2">Total Keys</div>
+        <div class="text-lg font-semibold"><%= @keys["total_keys"] || 0 %></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="border-b border-surface-border">
+    <div class="flex gap-4">
+      <a href="/keys" class="tab<%= ' active' if request.path == '/keys' %>">Lifecycle</a>
+      <a href="/share" class="tab<%= ' active' if request.path.start_with?('/share') %>">Sharing</a>
+    </div>
+  </div>
+
+  <!-- Key lifecycle table -->
+  <div class="card">
+    <h3 class="font-semibold mb-4">Key Lifecycle</h3>
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-surface-border">
+          <th class="text-left py-2 text-[#5A5A6E] font-medium">Key</th>
+          <th class="text-left py-2 text-[#5A5A6E] font-medium">Type</th>
+          <th class="text-left py-2 text-[#5A5A6E] font-medium">Created</th>
+          <th class="text-left py-2 text-[#5A5A6E] font-medium">Last Used</th>
+          <th class="text-left py-2 text-[#5A5A6E] font-medium">Rotation Due</th>
+          <th class="text-left py-2 text-[#5A5A6E] font-medium">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if @keys["keys"]&.any? %>
+          <% @keys["keys"].each do |key| %>
+            <tr class="border-b border-surface-border/50">
+              <td class="py-3 font-medium"><%= h(key["name"]) %></td>
+              <td class="py-3 text-[#8B8B9E]"><%= h(key["type"]) %></td>
+              <td class="py-3 text-[#8B8B9E]"><%= key["created"] %></td>
+              <td class="py-3 text-[#8B8B9E]"><%= key["last_used"] %></td>
+              <td class="py-3 text-[#8B8B9E]"><%= key["rotation_due"] || "—" %></td>
+              <td class="py-3">
+                <span class="severity-badge <%= key["status"] == 'active' ? 'success' : 'warning' %>">
+                  <%= key["status"]&.capitalize %>
+                </span>
+              </td>
+            </tr>
+          <% end %>
+        <% else %>
+          <tr>
+            <td colspan="6" class="py-8 text-center text-[#5A5A6E]">No key data available</td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+</div>

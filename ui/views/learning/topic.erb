@@ -1,0 +1,100 @@
+<% @page_title = @topic&.gsub("-", " ")&.capitalize || "Topic" %>
+
+<%
+  topics = {
+    "encryption" => {
+      title: "What is Encryption?",
+      icon: "lock",
+      color: "soteria-green",
+      simple: "Encryption scrambles your files into unreadable form. Only your password can unscramble them. It's like a safe that only you have the combination to. While you're using your files, everything works normally. Encryption protects them when your device is off, lost, or stolen.",
+      intermediate: "Soteria encrypts every section of your storage independently. Each section gets its own encryption key, derived from your master key. This means even if one key were somehow exposed, all other sections remain protected. Your master key is derived from your password using a slow, deliberate process that makes guessing extremely difficult.",
+      advanced: "Soteria uses XChaCha20-Poly1305 (default) or AES-256-GCM for per-block authenticated encryption. Each block's key is derived via HKDF-SHA256 from the volume root key, with the block index and previous block's hash bound into the derivation. The volume root key is derived from the user's passphrase via Argon2id (19 MiB, 2 iterations, 1 lane). A BLAKE3 lineage chain binds each block to its predecessor, detecting block reordering, insertion, or deletion."
+    },
+    "tpm" => {
+      title: "Hardware Security (TPM)",
+      icon: "cpu",
+      color: "soteria-blue",
+      simple: "Your device has a small security chip built into its motherboard. Think of it as a locked box inside your computer that holds part of your encryption key. This means even if someone removes your hard drive and tries to read it on another computer, they can't — because part of the key stays locked inside your original device.",
+      intermediate: "The TPM stores a cryptographic key that is bound to your specific device. Soteria uses this key as part of the encryption process. If your hard drive is removed from this device, the TPM key is not available, and the drive cannot be decrypted — even with your password. This is called 'hardware binding.'",
+      advanced: "Soteria uses the TPM2 platform's sealed storage to bind the volume root key to a specific PCR state. The key is only released when the boot chain matches the expected state (Secure Boot → bootloader → kernel → Soteria). If the boot chain is modified, the TPM refuses to release the key."
+    },
+    "key-rotation" => {
+      title: "Key Rotation",
+      icon: "refresh-cw",
+      color: "soteria-accent",
+      simple: "Periodically, Soteria changes your encryption keys — like changing the locks on your house. Your files stay safe, but the keys used to protect them are refreshed. This happens automatically. You don't need to do anything.",
+      intermediate: "Over time, the longer a key is in use, the more opportunity there is for it to be compromised. Rotating keys limits the window of exposure. Soteria rotates keys on a schedule you can configure. Old keys are securely erased.",
+      advanced: "Soteria uses an HKDF-based ratchet: new_key = HKDF-SHA256(current_key, salt = random 32B). The old key is zeroized in memory. Per-block keys are re-derived from the new root key on the next write."
+    },
+    "canaries" => {
+      title: "Intrusion Detection (Canaries)",
+      icon: "bell",
+      color: "soteria-amber",
+      simple: "Soteria places invisible 'tripwires' throughout your protected storage. If something touches them — a program, a process, or an unauthorized access — Soteria knows immediately. Think of it like a silent alarm that only Soteria can hear.",
+      intermediate: "Soteria creates special files in your protected areas that have no purpose other than detection. No legitimate program should ever access them. If a canary is accessed, Soteria logs the event, alerts you, and can automatically restrict access.",
+      advanced: "Canary tokens are cryptographically signed markers placed at strategic filesystem locations. Access triggers an event in the event bus, which the policy engine evaluates. In Fortress mode, a canary hit triggers automatic capability revocation and region freeze."
+    },
+    "honey" => {
+      title: "Decoy Protection (Honey Filesystem)",
+      icon: "eye",
+      color: "soteria-amber",
+      simple: "Soteria can create fake files and folders that look real but serve no purpose. If an unauthorized program or person accesses them, Soteria knows they shouldn't be there. It's like leaving a fake wallet on your desk — if someone takes it, you know they were snooping.",
+      intermediate: "Decoys add an extra layer of detection. Even if an attacker bypasses your password, the moment they touch a decoy file, Soteria records the activity and can respond. Decoys are cryptographically isolated from your real files.",
+      advanced: "The deception layer generates a parallel directory tree populated with cryptographically plausible but inert file structures. Decoy files are encrypted with independent keys and are indistinguishable from real files to an attacker without the volume root key."
+    },
+    "recovery" => {
+      title: "Recovery Keys",
+      icon: "life-buoy",
+      color: "soteria-green",
+      simple: "Your recovery key is a special code that can unlock your device if you forget your password. It is generated during setup and is not stored on your device. You are the only person who has it. Soteria cannot recover it for you.",
+      intermediate: "Without your recovery key and without your password, your files cannot be recovered. This is the strongest possible protection — it means no one else can recover them either. This is why Soteria asks you to save multiple copies during setup.",
+      advanced: "The recovery key is a 256-bit random value generated by OsRng during setup. It is displayed once and never stored by Soteria. The user is responsible for keeping it safe. The recovery verification flow confirms the key matches without exposing it or unlocking the device."
+    }
+  }
+
+  data = topics[@topic] || topics["encryption"]
+%>
+
+<div class="max-w-2xl mx-auto space-y-8 fade-in">
+  <a href="/learn" class="inline-flex items-center gap-1 text-sm text-soteria-accent hover:text-soteria-blue transition-colors">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i>
+    Back to Learning Center
+  </a>
+
+  <div class="card">
+    <div class="flex items-center gap-3 mb-6">
+      <div class="w-12 h-12 rounded-xl bg-<%= data[:color] %>/15 flex items-center justify-center">
+        <i data-lucide="<%= data[:icon] %>" class="w-6 h-6 text-<%= data[:color] %>"></i>
+      </div>
+      <h2 class="text-xl font-bold"><%= data[:title] %></h2>
+    </div>
+
+    <!-- Simple explanation (always visible) -->
+    <div class="mb-6">
+      <div class="text-xs font-medium text-[#5A5A6E] uppercase tracking-wider mb-2">Simple Explanation</div>
+      <p class="text-sm text-[#E8E8ED] leading-relaxed"><%= data[:simple] %></p>
+    </div>
+
+    <!-- Intermediate (expandable) -->
+    <details class="mb-4 group">
+      <summary class="cursor-pointer text-sm font-medium text-soteria-accent hover:text-soteria-blue transition-colors flex items-center gap-1">
+        <i data-lucide="chevron-right" class="w-4 h-4 transition-transform group-open:rotate-90"></i>
+        Learn more
+      </summary>
+      <div class="mt-3 pl-5 border-l-2 border-surface-border">
+        <p class="text-sm text-[#8B8B9E] leading-relaxed"><%= data[:intermediate] %></p>
+      </div>
+    </details>
+
+    <!-- Advanced (expandable) -->
+    <details class="group">
+      <summary class="cursor-pointer text-sm font-medium text-[#5A5A6E] hover:text-[#8B8B9E] transition-colors flex items-center gap-1">
+        <i data-lucide="chevron-right" class="w-4 h-4 transition-transform group-open:rotate-90"></i>
+        Technical details
+      </summary>
+      <div class="mt-3 pl-5 border-l-2 border-surface-border">
+        <p class="text-sm text-[#5A5A6E] leading-relaxed font-mono text-xs"><%= data[:advanced] %></p>
+      </div>
+    </details>
+  </div>
+</div>

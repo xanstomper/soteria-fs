@@ -1,0 +1,220 @@
+<% @page_title = "Dashboard" %>
+
+<div class="space-y-8 fade-in">
+  <!-- Protection Status (Hero) -->
+  <div class="card">
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <span class="status-dot <%= protection_color(@protection["score"] || 0) %>"></span>
+        <span class="text-lg font-semibold">
+          <% if @protection["status"] == "offline" %>
+            Soteria Offline
+          <% elsif (@protection["score"] || 0) >= 80 %>
+            All Systems Protected
+          <% elsif (@protection["score"] || 0) >= 50 %>
+            Attention Needed
+          <% else %>
+            Action Required
+          <% end %>
+        </span>
+      </div>
+      <a href="/protection" class="text-sm text-soteria-accent hover:text-soteria-blue transition-colors">View details →</a>
+    </div>
+
+    <div class="flex items-center gap-12">
+      <!-- Score ring -->
+      <div class="score-ring">
+        <svg viewBox="0 0 100 100" class="w-full h-full">
+          <circle cx="50" cy="50" r="42" fill="none" stroke="#1A1A24" stroke-width="8"/>
+          <%
+            score = @protection["score"] || 0
+            circumference = 2 * Math::PI * 42
+            offset = circumference - (score / 100.0 * circumference)
+            color = score >= 80 ? "#34D399" : score >= 50 ? "#FBBF24" : "#F87171"
+          %>
+          <circle cx="50" cy="50" r="42" fill="none" stroke="<%= color %>" stroke-width="8"
+                  stroke-dasharray="<%= circumference %>" stroke-dashoffset="<%= offset %>"
+                  stroke-linecap="round"/>
+        </svg>
+        <div class="value" style="color: <%= color %>"><%= score %></div>
+      </div>
+
+      <!-- Factor indicators -->
+      <div class="grid grid-cols-4 gap-8">
+        <div class="text-center">
+          <div class="flex justify-center mb-2">
+            <i data-lucide="boot" class="w-5 h-5 text-[#5A5A6E]"></i>
+          </div>
+          <div class="text-xs text-[#5A5A6E] mb-1">Boot Chain</div>
+          <div class="text-sm font-medium" style="color: <%= (@protection.dig("factors", "boot_chain") == "verified") ? "#34D399" : "#FBBF24" %>">
+            <%= (@protection.dig("factors", "boot_chain") || "unknown").capitalize %>
+          </div>
+        </div>
+        <div class="text-center">
+          <div class="flex justify-center mb-2">
+            <i data-lucide="cpu" class="w-5 h-5 text-[#5A5A6E]"></i>
+          </div>
+          <div class="text-xs text-[#5A5A6E] mb-1">TPM</div>
+          <div class="text-sm font-medium" style="color: <%= (@protection.dig("factors", "tpm") == "bound") ? "#34D399" : "#FBBF24" %>">
+            <%= (@protection.dig("factors", "tpm") || "unknown").capitalize %>
+          </div>
+        </div>
+        <div class="text-center">
+          <div class="flex justify-center mb-2">
+            <i data-lucide="key" class="w-5 h-5 text-[#5A5A6E]"></i>
+          </div>
+          <div class="text-xs text-[#5A5A6E] mb-1">Keys</div>
+          <div class="text-sm font-medium" style="color: <%= (@keys["rotation_health"] == "healthy") ? "#34D399" : "#FBBF24" %>">
+            <%= (@keys["rotation_health"] || "unknown").capitalize %>
+          </div>
+        </div>
+        <div class="text-center">
+          <div class="flex justify-center mb-2">
+            <i data-lucide="life-buoy" class="w-5 h-5 text-[#5A5A6E]"></i>
+          </div>
+          <div class="text-xs text-[#5A5A6E] mb-1">Recovery</div>
+          <div class="text-sm font-medium" style="color: <%= @recovery["verified"] ? "#34D399" : "#FBBF24" %>">
+            <%= @recovery["verified"] ? "Verified" : "Not tested" %>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stat cards row -->
+  <div class="grid grid-cols-4 gap-4">
+    <div class="stat-card">
+      <div class="label">Encrypted Storage</div>
+      <div class="value">
+        <%= format_bytes(@storage["encrypted_bytes"]) %>
+      </div>
+      <div class="text-xs text-[#5A5A6E] mt-1">
+        of <%= format_bytes(@storage["total_bytes"]) %> total
+      </div>
+      <%
+        pct = @storage["total_bytes"].to_i > 0 ? (@storage["encrypted_bytes"].to_f / @storage["total_bytes"] * 100).to_i : 0
+      %>
+      <div class="progress-bar mt-3">
+        <div class="fill bg-soteria-green" style="width: <%= pct %>%"></div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="label">Security Domains</div>
+      <div class="value"><%= @storage["domain_count"] || 0 %></div>
+      <div class="text-xs text-[#5A5A6E] mt-1">Active domains</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="label">Devices</div>
+      <div class="value"><%= @devices["devices"]&.length || 0 %></div>
+      <div class="text-xs text-[#5A5A6E] mt-1">
+        <% if @devices["all_trusted"] %>
+          <span class="text-soteria-green">All trusted</span>
+        <% else %>
+          <span class="text-soteria-amber">Review needed</span>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="label">Key Rotation</div>
+      <div class="value" style="color: <%= (@keys["rotation_health"] == "healthy") ? "#34D399" : "#FBBF24" %>">
+        <%= (@keys["rotation_health"] || "Unknown").capitalize %>
+      </div>
+      <div class="text-xs text-[#5A5A6E] mt-1">
+        <% if @keys["next_rotation"] %>
+          Next: <%= @keys["next_rotation"] %>
+        <% else %>
+          No rotation scheduled
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom row: Events + Recovery -->
+  <div class="grid grid-cols-2 gap-6">
+    <!-- Recent Activity -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold">Recent Activity</h3>
+        <a href="/threats/events" class="text-sm text-soteria-accent hover:text-soteria-blue transition-colors">View all →</a>
+      </div>
+      <div class="space-y-2">
+        <% if @events["events"]&.any? %>
+          <% @events["events"].first(5).each do |event| %>
+            <div class="event-card">
+              <div class="flex-shrink-0 mt-0.5">
+                <%
+                  sev = event["severity"].to_s.downcase
+                  icon_color = case sev
+                  when "critical", "high" then "text-soteria-red"
+                  when "warning", "medium" then "text-soteria-amber"
+                  else "text-[#5A5A6E]"
+                  end
+                %>
+                <i data-lucide="<%= severity_icon(sev) %>" class="w-4 h-4 <%= icon_color %>"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm"><%= h(event["message"] || event["event_type"]) %></div>
+                <div class="text-xs text-[#5A5A6E]"><%= relative_time(event["timestamp"]) %></div>
+              </div>
+            </div>
+          <% end %>
+        <% else %>
+          <div class="text-center py-8 text-[#5A5A6E]">
+            <i data-lucide="check-circle" class="w-8 h-8 mx-auto mb-2 text-soteria-green"></i>
+            <div class="text-sm">All clear. Soteria is monitoring in the background.</div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <!-- Recovery Center -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold">Recovery Center</h3>
+        <a href="/recovery" class="text-sm text-soteria-accent hover:text-soteria-blue transition-colors">Manage →</a>
+      </div>
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i data-lucide="life-buoy" class="w-4 h-4 text-[#5A5A6E]"></i>
+            <span class="text-sm">Recovery Key</span>
+          </div>
+          <% if @recovery["verified"] %>
+            <span class="severity-badge success">Verified</span>
+          <% else %>
+            <span class="severity-badge warning">Not tested</span>
+          <% end %>
+        </div>
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i data-lucide="clock" class="w-4 h-4 text-[#5A5A6E]"></i>
+            <span class="text-sm">Last tested</span>
+          </div>
+          <span class="text-sm text-[#8B8B9E]">
+            <%= @recovery["last_tested"] ? relative_time(@recovery["last_tested"]) : "Never" %>
+          </span>
+        </div>
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i data-lucide="copy" class="w-4 h-4 text-[#5A5A6E]"></i>
+            <span class="text-sm">Backup copies</span>
+          </div>
+          <span class="text-sm text-[#8B8B9E]">
+            <%= @recovery["backup_count"] || 0 %>
+          </span>
+        </div>
+        <% unless @recovery["verified"] %>
+          <div class="pt-2">
+            <a href="/recovery" class="btn btn-secondary text-xs">
+              <i data-lucide="check-circle" class="w-3 h-3"></i>
+              Test Recovery Key
+            </a>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+</div>

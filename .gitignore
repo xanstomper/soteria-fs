@@ -1,0 +1,46 @@
+# Rust
+rust-core/target/
+**/*.rs.bk
+Cargo.lock
+
+# Ruby
+ui/vendor/
+ui/.bundle/
+ui/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Build artifacts
+*.msix
+*.dmg
+*.deb
+*.rpm
+*.pkg
+
+# Test artifacts
+*.sot
+*.sot.kdf
+*.sot.wal
+*.sot.shares
+
+# Keys (NEVER commit)
+*.sk
+*.pk
+*.key
+*.pfx
+*.pem
+
+# Temp
+/tmp/
+packaging/windows/package/
+packaging/linux/rpm/
+packaging/macos/Soteria.app/

@@ -1,0 +1,98 @@
+name: Soteria CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Format check
+        run: cargo fmt --check
+        working-directory: rust-core
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: rust-core
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Run tests
+        run: cargo test --all-targets
+        working-directory: rust-core
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run audit
+        run: cargo audit
+        working-directory: rust-core
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-core -> target
+      - name: Build release
+        run: cargo build --release
+        working-directory: rust-core
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: soteriad-${{ matrix.os }}
+          path: rust-core/target/release/soteriad*
+
+  release:
+    name: Release
+    needs: [lint, test, security, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            soteriad-ubuntu-latest/soteriad
+            soteriad-windows-latest/soteriad.exe
+            soteriad-macos-latest/soteriad
+          generate_release_notes: true

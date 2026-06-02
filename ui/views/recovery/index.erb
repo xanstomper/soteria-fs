@@ -1,0 +1,115 @@
+<% @page_title = "Recovery Center" %>
+
+<div class="space-y-8 fade-in">
+  <!-- Recovery status hero -->
+  <div class="card">
+    <div class="flex items-center gap-6">
+      <div class="flex-shrink-0">
+        <div class="w-16 h-16 rounded-full flex items-center justify-center"
+             style="background: <%= @recovery["verified"] ? 'rgba(52,211,153,0.15)' : 'rgba(251,191,36,0.15)' %>">
+          <i data-lucide="life-buoy" class="w-8 h-8"
+             style="color: <%= @recovery["verified"] ? '#34D399' : '#FBBF24' %>"></i>
+        </div>
+      </div>
+      <div class="flex-1">
+        <h2 class="text-lg font-semibold mb-1">
+          <% if @recovery["verified"] %>
+            Recovery Key Verified
+          <% else %>
+            Recovery Key Not Yet Tested
+          <% end %>
+        </h2>
+        <p class="text-sm text-[#8B8B9E]">
+          <% if @recovery["verified"] %>
+            Your recovery key was last tested <%= relative_time(@recovery["last_tested"]) %>.
+            Your backup is working correctly.
+          <% else %>
+            You haven't tested your recovery key yet. Testing verifies that your backup
+            works without unlocking your device. We recommend testing every 30 days.
+          <% end %>
+        </p>
+      </div>
+      <div>
+        <button onclick="document.getElementById('verify-modal').classList.remove('hidden')"
+                class="btn btn-primary">
+          <i data-lucide="check-circle" class="w-4 h-4"></i>
+          Verify Recovery Key
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Info cards -->
+  <div class="grid grid-cols-3 gap-4">
+    <div class="stat-card">
+      <div class="label">Last Tested</div>
+      <div class="value text-base">
+        <%= @recovery["last_tested"] ? relative_time(@recovery["last_tested"]) : "Never" %>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Backup Copies</div>
+      <div class="value"><%= @recovery["backup_count"] || 0 %></div>
+      <div class="text-xs text-[#5A5A6E] mt-1">We recommend at least 2</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Status</div>
+      <div class="value text-base" style="color: <%= @recovery["verified"] ? '#34D399' : '#FBBF24' %>">
+        <%= @recovery["verified"] ? "Ready" : "Needs testing" %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Educational content -->
+  <div class="card">
+    <h3 class="font-semibold mb-4">About Your Recovery Key</h3>
+    <div class="space-y-4 text-sm text-[#8B8B9E]">
+      <div class="flex items-start gap-3">
+        <i data-lucide="shield" class="w-5 h-5 text-soteria-accent flex-shrink-0 mt-0.5"></i>
+        <div>
+          <div class="font-medium text-[#E8E8ED] mb-1">What is a recovery key?</div>
+          <p>Your recovery key is a special code that can unlock your device if you forget your password.
+          It is generated during setup and is not stored on your device.</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-3">
+        <i data-lucide="alert-triangle" class="w-5 h-5 text-soteria-amber flex-shrink-0 mt-0.5"></i>
+        <div>
+          <div class="font-medium text-[#E8E8ED] mb-1">Why is it critical?</div>
+          <p>Without your recovery key and without your password, your files cannot be recovered.
+          This is by design — it means no one else can recover them either.</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-3">
+        <i data-lucide="check-circle" class="w-5 h-5 text-soteria-green flex-shrink-0 mt-0.5"></i>
+        <div>
+          <div class="font-medium text-[#E8E8ED] mb-1">How do I test it?</div>
+          <p>Click "Verify Recovery Key" above. Soteria will guide you through a safe test that confirms
+          your recovery key works — without unlocking your device or exposing your key.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Verify modal -->
+  <div id="verify-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div class="card w-full max-w-md">
+      <h3 class="font-semibold mb-4">Verify Recovery Key</h3>
+      <p class="text-sm text-[#8B8B9E] mb-4">
+        Enter your recovery key to verify it works. This does not unlock your device.
+      </p>
+      <form hx-post="/recovery/verify" hx-target="#verify-result" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">Recovery Key</label>
+          <input type="text" name="key" class="input font-mono" placeholder="XXXX-XXXX-XXXX-XXXX">
+        </div>
+        <div class="flex gap-2 justify-end">
+          <button type="button" onclick="document.getElementById('verify-modal').classList.add('hidden')"
+                  class="btn btn-secondary">Cancel</button>
+          <button type="submit" class="btn btn-primary">Verify</button>
+        </div>
+      </form>
+      <div id="verify-result" class="mt-4"></div>
+    </div>
+  </div>
+</div>
