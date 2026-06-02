@@ -1,5 +1,6 @@
 # Rust
 rust-core/target/
+installer/target/
 **/*.rs.bk
 Cargo.lock
 

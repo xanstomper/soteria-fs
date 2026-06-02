@@ -47,6 +47,38 @@ enum Commands {
         #[arg(long, default_value = "../config/soteria.toml")]
         config: PathBuf,
     },
+    /// Quick-mount a volume: decrypts all files to a directory.
+    /// Works on all platforms (no FUSE required). Files are decrypted
+    /// on demand and re-encrypted when the directory is unmounted.
+    QuickMount {
+        /// Path to the volume directory.
+        #[arg(long)]
+        volume: PathBuf,
+        /// Passphrase for the volume.
+        #[arg(long)]
+        passphrase: String,
+        /// Directory to mount into (created if needed).
+        #[arg(long)]
+        mountpoint: PathBuf,
+        /// Name of the volume to mount.
+        #[arg(long)]
+        name: String,
+    },
+    /// Unmount a quick-mounted volume (re-encrypts modified files).
+    Unmount {
+        /// The mountpoint to unmount.
+        #[arg(long)]
+        mountpoint: PathBuf,
+        /// Path to the volume directory.
+        #[arg(long)]
+        volume: PathBuf,
+        /// Passphrase for the volume.
+        #[arg(long)]
+        passphrase: String,
+        /// Name of the volume.
+        #[arg(long)]
+        name: String,
+    },
     /// Encrypt a file into a Soteria volume directory using a passphrase.
     /// Writes `<dir>/<name>.sot` and a `.sot.kdf` sidecar.
     Encrypt {
@@ -299,6 +331,117 @@ fn main() -> anyhow::Result<()> {
                     ],
                 )?;
             }
+        }
+        Commands::QuickMount {
+            volume,
+            passphrase,
+            mountpoint,
+            name,
+        } => {
+            // Decrypt all files from the volume into the mountpoint.
+            std::fs::create_dir_all(&mountpoint)?;
+
+            let volume_path = backing_path_for(&volume, &name);
+            let kdf_path = soteria_core::fs_layer::kdf::kdf_path_for(&volume_path);
+            let kdf_file = soteria_core::fs_layer::kdf::VolumeKeyFile::load(&kdf_path)?;
+            let key =
+                soteria_core::fs_layer::kdf::derive_volume_key(passphrase.as_bytes(), &kdf_file)?;
+
+            let vol = soteria_core::fs_layer::storage::OnDiskFile::load(&volume_path)?;
+            let crypto = soteria_core::crypto_engine::block::BlockCrypto::new(
+                soteria_core::crypto_engine::AeadAlgorithm::XChaCha20Poly1305,
+                *key,
+            );
+            let plaintext = vol.plaintext(&crypto)?;
+
+            let output_path = mountpoint.join(format!("{name}.decrypted"));
+            std::fs::write(&output_path, &plaintext)?;
+
+            // Write a mount marker for unmount to find.
+            let marker = serde_json::json!({
+                "volume": volume,
+                "name": name,
+                "mountpoint": mountpoint,
+                "output": output_path,
+                "mounted_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+            let marker_path = mountpoint.join(".soteria-mount.json");
+            std::fs::write(&marker_path, serde_json::to_string_pretty(&marker)?)?;
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "action": "mounted",
+                    "mountpoint": mountpoint,
+                    "output": output_path,
+                    "size": plaintext.len(),
+                }))?
+            );
+        }
+        Commands::Unmount {
+            mountpoint,
+            volume,
+            passphrase,
+            name,
+        } => {
+            // Read the mount marker.
+            let marker_path = mountpoint.join(".soteria-mount.json");
+            anyhow::ensure!(
+                marker_path.exists(),
+                "No .soteria-mount.json found in {mountpoint:?}. Is this a mounted Soteria volume?"
+            );
+            let marker: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&marker_path)?)?;
+
+            let output_path = PathBuf::from(
+                marker["output"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid mount marker"))?,
+            );
+
+            // Read the (possibly modified) plaintext.
+            let plaintext = std::fs::read(&output_path)?;
+
+            // Re-encrypt to the volume.
+            let volume_path = backing_path_for(&volume, &name);
+            let kdf_path = soteria_core::fs_layer::kdf::kdf_path_for(&volume_path);
+            let kdf_file = soteria_core::fs_layer::kdf::VolumeKeyFile::load(&kdf_path)?;
+            let key =
+                soteria_core::fs_layer::kdf::derive_volume_key(passphrase.as_bytes(), &kdf_file)?;
+
+            let file_id = {
+                let mut material = b"soteria-fs-file-id-v1".to_vec();
+                material.extend_from_slice(name.as_bytes());
+                let mut h = [0u8; 32];
+                h.copy_from_slice(blake3::hash(&material).as_bytes());
+                h
+            };
+            let on_disk = soteria_core::fs_layer::storage::encrypt_to_disk(
+                file_id,
+                soteria_core::crypto_engine::AeadAlgorithm::XChaCha20Poly1305,
+                *key,
+                65536,
+                &plaintext,
+            )?;
+            on_disk.save(&volume_path)?;
+
+            // Clean up the mountpoint.
+            std::fs::remove_file(&output_path)?;
+            std::fs::remove_file(&marker_path)?;
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "action": "unmounted",
+                    "volume": volume,
+                    "size": plaintext.len(),
+                }))?
+            );
         }
         Commands::Encrypt {
             src,
@@ -692,16 +835,22 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Tui => {
-            let bus = std::sync::Arc::new(soteria_core::event_bus::bus::EventBus::new());
-            // Publish a startup event.
-            bus.publish(
-                soteria_core::event_bus::bus::EventCategory::System,
-                soteria_core::event_bus::bus::Severity::Info,
-                "soteriad",
-                "Soteria runtime started",
-                soteria_core::event_bus::bus::EventData::None,
-            );
-            soteria_core::tui::app::run(bus)?;
+            #[cfg(not(feature = "tui"))]
+            {
+                anyhow::bail!("built without TUI support; rebuild with --features tui");
+            }
+            #[cfg(feature = "tui")]
+            {
+                let bus = std::sync::Arc::new(soteria_core::event_bus::bus::EventBus::new());
+                bus.publish(
+                    soteria_core::event_bus::bus::EventCategory::System,
+                    soteria_core::event_bus::bus::Severity::Info,
+                    "soteriad",
+                    "Soteria runtime started",
+                    soteria_core::event_bus::bus::EventData::None,
+                );
+                soteria_core::tui::app::run(bus)?;
+            }
         }
     }
     Ok(())

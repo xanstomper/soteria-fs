@@ -14,6 +14,7 @@ pub mod sensors;
 pub mod simulation;
 pub mod snapshot_engine;
 pub mod tpm;
+#[cfg(feature = "tui")]
 pub mod tui;
 
 pub type Result<T> = anyhow::Result<T>;
