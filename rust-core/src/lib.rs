@@ -3,6 +3,7 @@ pub mod anti_forensic;
 pub mod config;
 pub mod crypto_engine;
 pub mod daemon;
+pub mod deception;
 pub mod deception_layer;
 pub mod enterprise;
 pub mod event_bus;
