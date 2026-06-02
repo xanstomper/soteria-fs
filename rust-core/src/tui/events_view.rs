@@ -1,0 +1,1 @@
+//! events_view module.

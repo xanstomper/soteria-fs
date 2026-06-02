@@ -110,16 +110,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         verify_only: bool,
     },
-    /// Start the REST API server for the web UI. Binds to 127.0.0.1:7777
-    /// by default. The Ruby web UI connects to this endpoint.
-    Serve {
-        /// Address to bind to.
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
-        /// Port to listen on.
-        #[arg(long, default_value_t = 7777)]
-        port: u16,
-    },
+    /// Start the native terminal UI dashboard. Runs as a full-screen
+    /// TUI that communicates directly with the Soteria runtime.
+    /// No HTTP, no browser, no external process.
+    Tui,
     /// Manage ML-KEM-768 sharing of a volume's root key.
     #[command(subcommand)]
     Share(ShareCommands),
@@ -245,8 +239,7 @@ fn derive_root_key_from_volume(volume_path: &Path, passphrase: &str) -> anyhow::
     Ok(*key)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter("info")
@@ -271,12 +264,12 @@ async fn main() -> anyhow::Result<()> {
                 Severity::new(severity),
                 serde_json::json!({"deterministic": true}),
             )?;
-            let record = bus.append(event)?;
-            let decision = policy.evaluate(&record.event, &mut ResponseContext::default());
+            let record = bus.append(event.clone())?;
+            let decision = policy.evaluate(&event, &mut ResponseContext::default());
             println!(
                 "{}",
                 serde_json::to_string_pretty(
-                    &serde_json::json!({"event_record": record, "decision": decision})
+                    &serde_json::json!({"event_record": *record, "decision": decision})
                 )?
             );
         }
@@ -698,32 +691,17 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         },
-        Commands::Serve { bind, port } => {
-            let addr = format!("{}:{}", bind, port);
-            tracing::info!("Starting Soteria REST API on {}", addr);
-            let app = soteria_core::api::router();
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "ok": true,
-                    "message": "Soteria API server started",
-                    "url": format!("http://{}", addr),
-                    "endpoints": [
-                        "/api/status",
-                        "/api/protection/score",
-                        "/api/storage",
-                        "/api/domains",
-                        "/api/keys",
-                        "/api/events",
-                        "/api/threats/summary",
-                        "/api/recovery",
-                        "/api/devices",
-                        "/api/settings"
-                    ]
-                }))?
+        Commands::Tui => {
+            let bus = std::sync::Arc::new(soteria_core::event_bus::bus::EventBus::new());
+            // Publish a startup event.
+            bus.publish(
+                soteria_core::event_bus::bus::EventCategory::System,
+                soteria_core::event_bus::bus::Severity::Info,
+                "soteriad",
+                "Soteria runtime started",
+                soteria_core::event_bus::bus::EventData::None,
             );
-            axum::serve(listener, app).await?;
+            soteria_core::tui::app::run(bus)?;
         }
     }
     Ok(())

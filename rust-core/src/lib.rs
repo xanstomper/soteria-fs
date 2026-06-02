@@ -1,5 +1,4 @@
 pub mod ai_observer;
-pub mod api;
 pub mod config;
 pub mod crypto_engine;
 pub mod daemon;
@@ -15,5 +14,6 @@ pub mod sensors;
 pub mod simulation;
 pub mod snapshot_engine;
 pub mod tpm;
+pub mod tui;
 
 pub type Result<T> = anyhow::Result<T>;

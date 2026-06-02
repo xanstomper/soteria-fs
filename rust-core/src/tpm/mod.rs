@@ -11,8 +11,7 @@ pub mod hardware;
 pub fn tpm_available() -> bool {
     #[cfg(target_os = "linux")]
     {
-        std::path::Path::new("/dev/tpmrm0").exists()
-            || std::path::Path::new("/dev/tpm0").exists()
+        std::path::Path::new("/dev/tpmrm0").exists() || std::path::Path::new("/dev/tpm0").exists()
     }
 
     #[cfg(target_os = "windows")]
