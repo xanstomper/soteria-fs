@@ -43,7 +43,7 @@ impl ShamirSecretSharing {
             threshold > 0 && threshold <= total,
             "threshold must be in [1, total]"
         );
-        anyhow::ensure!(total > 0 && total <= 255, "total must be in [1, 255]");
+        anyhow::ensure!(total > 0, "total must be > 0");
         Ok(Self { threshold, total })
     }
 
