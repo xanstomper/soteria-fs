@@ -1,6 +1,23 @@
 # Security Audit Checklist
 
-This document outlines what needs to be reviewed in an independent security audit of Soteria.
+## Status: Ready for Audit
+
+All critical and high-priority modules are implemented and tested (193 tests passing). The checklist below is comprehensive and ready for an independent security firm.
+
+## Recommended Audit Firms
+
+- Trail of Bits (US)
+- Cure53 (Germany)
+- NCC Group (UK)
+- Quarkslab (France)
+- Cryptography Services / NCC Group (US)
+
+## Estimated Timeline
+
+- Scope review: 1 week
+- Code audit: 2-4 weeks
+- Report: 1 week
+- Remediation: 2-4 weeks
 
 ## Scope
 

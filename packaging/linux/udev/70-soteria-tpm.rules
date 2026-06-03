@@ -1,11 +1,5 @@
 # Soteria TPM2 access rules
 # Install to: /etc/udev/rules.d/70-soteria-tpm.rules
-
-# TPM2 device (Linux kernel resource manager)
 SUBSYSTEM=="tpm", KERNEL=="tpmrm[0-9]*", MODE="0660", GROUP="tss", TAG+="systemd"
-
-# TPM2 device (legacy)
 SUBSYSTEM=="tpm", KERNEL=="tpm[0-9]*", MODE="0660", GROUP="tss"
-
-# FUSE device
 KERNEL=="fuse", MODE="0666"

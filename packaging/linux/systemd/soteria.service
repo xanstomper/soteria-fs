@@ -1,29 +1,18 @@
 [Unit]
-Description=Soteria Encrypted Security Platform
-Documentation=https://github.com/example/soteria-fs
+Description=Soteria Aegis Encrypted Security Platform
 After=network.target local-fs.target
-Wants=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/soteriad serve --bind 127.0.0.1 --port 7777
-ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
-
-# Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
-PrivateDevices=no
 ReadWritePaths=/etc/soteria /var/lib/soteria
-
-# TPM access
 SupplementaryGroups=tss
-
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=soteria

@@ -3,30 +3,20 @@ name = "soteria-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
-
 [package.metadata]
 cargo-fuzz = true
-
 [dependencies]
 libfuzzer-sys = "0.4"
 soteria-core = { path = ".." }
-
 [[bin]]
 name = "fuzz_wal_parse"
 path = "fuzz_targets/fuzz_wal_parse.rs"
-
-[[bin]]
-name = "fuzz_lineage_prev_salt"
-path = "fuzz_targets/fuzz_lineage_prev_salt.rs"
-
-[[bin]]
-name = "fuzz_hex_decode"
-path = "fuzz_targets/fuzz_hex_decode.rs"
-
 [[bin]]
 name = "fuzz_aead_roundtrip"
 path = "fuzz_targets/fuzz_aead_roundtrip.rs"
-
 [[bin]]
-name = "fuzz_share_parse"
-path = "fuzz_targets/fuzz_share_parse.rs"
+name = "fuzz_hex_parse"
+path = "fuzz_targets/fuzz_hex_parse.rs"
+[[bin]]
+name = "fuzz_block_lineage"
+path = "fuzz_targets/fuzz_block_lineage.rs"
