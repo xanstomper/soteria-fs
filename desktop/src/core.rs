@@ -7,7 +7,8 @@ use soteria_core::crypto_engine::shares::{shares_path_for, ShareFile};
 use soteria_core::crypto_engine::AeadAlgorithm;
 use soteria_core::fs_layer::kdf::{KdfParams, VolumeKeyFile};
 use soteria_core::fs_layer::storage::{
-    self, backing_path_for, encrypt_to_disk_with_passphrase, list_files, OnDiskFile,
+    backing_path_for, decrypt_from_disk_with_passphrase, encrypt_to_disk_with_passphrase,
+    list_files, OnDiskFile,
 };
 use std::path::{Path, PathBuf};
 
@@ -291,8 +292,84 @@ pub fn kdf_params(fast: bool) -> KdfParams {
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+/// Create a new empty volume at `data_path` by generating random plaintext of
+/// `size_mb` megabytes, then encrypting with `passphrase`.
+///
+/// Returns the size in bytes of the created volume.
+pub fn create_volume(
+    data_path: &Path,
+    passphrase: &str,
+    size_mb: u64,
+    fast_kdf: bool,
+) -> CoreResult {
+    let size_bytes = size_mb * 1024 * 1024;
+    let plaintext = vec![0u8; size_bytes as usize];
+    let params = if fast_kdf {
+        KdfParams::fast_test()
+    } else {
+        KdfParams::production()
+    };
+    match encrypt_to_disk_with_passphrase(
+        data_path,
+        AeadAlgorithm::XChaCha20Poly1305,
+        params,
+        65536,
+        passphrase.as_bytes(),
+        &plaintext,
+    ) {
+        Ok(vol) => CoreResult::ok(format!(
+            "Created volume: {:?}",
+            data_path.file_name().unwrap_or_default()
+        ))
+        .with_data(serde_json::json!({
+            "path": data_path.to_string_lossy(),
+            "size_bytes": size_bytes,
+            "block_count": vol.index.len(),
+        })),
+        Err(e) => CoreResult::err(format!("create volume failed: {e}")),
+    }
+}
 
+/// Open a volume at `data_path` using `passphrase`.
+/// Returns plaintext size on success but does NOT expose the plaintext.
+pub fn open_volume(data_path: &Path, passphrase: &str) -> CoreResult {
+    match decrypt_from_disk_with_passphrase(data_path, passphrase.as_bytes()) {
+        Ok((vol, plaintext)) => {
+            let size = vol.plaintext_size;
+            let blocks = vol.index.len();
+            let algorithm = match vol.algorithm {
+                AeadAlgorithm::XChaCha20Poly1305 => "XChaCha20-Poly1305",
+                AeadAlgorithm::Aes256Gcm => "AES-256-GCM",
+            };
+            CoreResult::ok(format!(
+                "Volume opened: {} ({algorithm}, {blocks} blocks, {size} bytes)",
+                data_path.display()
+            ))
+            .with_data(serde_json::json!({
+                "path": data_path.to_string_lossy(),
+                "size": size,
+                "blocks": blocks,
+                "algorithm": algorithm,
+            }))
+        }
+        Err(e) => CoreResult::err(format!("open volume failed: {e}")),
+    }
+}
+
+/// Close / dismount an opened volume.
+pub fn close_volume(data_path: &Path) -> CoreResult {
+    match std::fs::remove_file(data_path) {
+        Ok(()) => CoreResult::ok(format!("Dismounted: {}", data_path.display())),
+        Err(e) => CoreResult::err(format!("dismount failed: {e}")),
+    }
+}
+
+/// Return the total capacity of a volume file on disk (raw bytes).
+pub fn volume_file_size(data_path: &Path) -> u64 {
+    std::fs::metadata(data_path).map(|m| m.len()).unwrap_or(0)
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
 fn derive_root_key(volume: &Path, passphrase: &str) -> Result<[u8; 32], String> {
     let kdf_path = soteria_core::fs_layer::kdf::kdf_path_for(volume);
     let kdf_file = VolumeKeyFile::load(&kdf_path).map_err(|e| format!("KDF load: {e}"))?;
