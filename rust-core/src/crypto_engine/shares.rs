@@ -165,6 +165,10 @@ impl ShareFile {
     /// `volume_root_key_fingerprint` matches the supplied root key. Missing
     /// file is treated as a valid empty share file (the owner is setting up
     /// sharing for the first time).
+    ///
+    /// V-AUDIT-9: Validates the BLAKE3 chain on load. An attacker who has
+    /// file-write access to the share file can rewrite events without
+    /// updating the chain; we detect that here.
     pub fn open(volume_path: &Path, root_key: &[u8; 32]) -> crate::Result<Self> {
         let path = shares_path_for(volume_path);
         let expected_fp: [u8; 32] = *blake3::hash(root_key).as_bytes();
@@ -181,6 +185,10 @@ impl ShareFile {
             anyhow::bail!(
                 "share file: volume key fingerprint mismatch (wrong volume or wrong key)"
             );
+        }
+        // V-AUDIT-9: Verify chain on load. Refuse to use a tampered share file.
+        if let Some(bad) = sf.verify_chain() {
+            anyhow::bail!("share file: chain broken at event index {bad}");
         }
         Ok(sf)
     }
@@ -291,10 +299,19 @@ impl ShareFile {
     }
 
     /// Append a chain hash for the latest event (PATCH-06).
+    ///
+    /// V-AUDIT-8: Serialization of a `ShareEvent` cannot fail for any input.
+    /// We use `expect` rather than `unwrap_or_default` so a failure surfaces
+    /// as a panic during development instead of a silent fallback to empty
+    /// bytes (which an attacker could predict and forge).
     fn append_chain_hash(&mut self) {
         let prev = self.chain.last().copied().unwrap_or([0u8; 32]);
-        let event = self.events.last().unwrap();
-        let event_bytes = serde_json::to_vec(event).unwrap_or_default();
+        let event = self
+            .events
+            .last()
+            .expect("events vec is non-empty when appending chain");
+        let event_bytes =
+            serde_json::to_vec(event).expect("ShareEvent serialization is total and cannot fail");
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"soteria:share-chain:v1");
         hasher.update(&prev);
@@ -304,16 +321,24 @@ impl ShareFile {
 
     /// Verify the chain integrity. Returns the index of the first bad
     /// event, or None if the chain is valid.
+    ///
+    /// V-AUDIT-7: Strict validation. The chain MUST be the same length as
+    /// the events list, and every entry MUST match the recomputed hash.
+    /// An attacker who deletes chain entries will be caught here.
     pub fn verify_chain(&self) -> Option<usize> {
+        if self.chain.len() != self.events.len() {
+            return Some(self.chain.len().min(self.events.len()));
+        }
         let mut prev = [0u8; 32];
         for (i, event) in self.events.iter().enumerate() {
-            let event_bytes = serde_json::to_vec(event).unwrap_or_default();
+            let event_bytes = serde_json::to_vec(event)
+                .expect("ShareEvent serialization is total and cannot fail");
             let mut hasher = blake3::Hasher::new();
             hasher.update(b"soteria:share-chain:v1");
             hasher.update(&prev);
             hasher.update(&event_bytes);
             let expected = *hasher.finalize().as_bytes();
-            if i < self.chain.len() && self.chain[i] != expected {
+            if self.chain[i] != expected {
                 return Some(i);
             }
             prev = expected;

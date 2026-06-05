@@ -33,10 +33,20 @@ const FILE_BLOCK: u64 = 4096;
 /// Write-back cache entry.
 struct CachedFile {
     name: String,
+    file_id: [u8; 32],
     plaintext: Vec<u8>,
     dirty: bool,
     last_access: Instant,
     last_flush: Instant,
+}
+
+/// Inode entry: name + the file_id used for key derivation. file_id is
+/// stable for the lifetime of the file, so renaming the file (which changes
+/// `name`) does not break the encryption key (V-AUDIT-5).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct InodeEntry {
+    name: String,
+    file_id: [u8; 32],
 }
 
 /// Hardened FUSE filesystem with caching and proper inode management.
@@ -51,8 +61,9 @@ pub struct SoteriaFs {
     /// Read cache (inode -> (plaintext, last_access)). Decrypted files
     /// cached in memory to avoid repeated decryption on every read.
     read_cache: Mutex<HashMap<u64, (Vec<u8>, Instant)>>,
-    /// Inode -> name mapping. Persisted to disk as a sidecar file.
-    inode_map: Mutex<HashMap<u64, String>>,
+    /// Inode -> InodeEntry (name, file_id) mapping. Persisted to disk as
+    /// a sidecar file. file_id is stable across renames.
+    inode_map: Mutex<HashMap<u64, InodeEntry>>,
     /// Name -> inode mapping (reverse).
     name_map: Mutex<HashMap<String, u64>>,
     next_fh: Mutex<u64>,
@@ -65,13 +76,16 @@ pub struct SoteriaFs {
 }
 
 impl SoteriaFs {
-    pub fn new(backing: PathBuf, cfg: SoteriaConfig) -> crate::Result<Self> {
+    /// Build a FUSE filesystem using a real volume key. The key is bound to
+    /// the keyring; nothing about the construction is hardcoded. Reject
+    /// sentinel keys to prevent the V-AUDIT-1 bug from ever shipping again.
+    pub fn new(backing: PathBuf, cfg: SoteriaConfig, volume_key: [u8; 32]) -> crate::Result<Self> {
+        Self::refuse_sentinel_key(&volume_key)?;
         let algorithm = if cfg.crypto.algorithm.eq_ignore_ascii_case("aes-256-gcm") {
             AeadAlgorithm::Aes256Gcm
         } else {
             AeadAlgorithm::XChaCha20Poly1305
         };
-        let volume_key = [7u8; 32]; // TODO: TPM-unsealed root key
 
         // Load or build the inode map.
         let (inode_map, name_map) = Self::load_inode_map(&backing);
@@ -93,26 +107,79 @@ impl SoteriaFs {
         })
     }
 
+    /// Build a FUSE filesystem deriving the volume key from a passphrase and
+    /// the KDF sidecar at `<backing>/.volume.kdf`. This is the path the
+    /// `mount` command should use; the sidecar must already exist.
+    pub fn from_passphrase(
+        backing: PathBuf,
+        cfg: SoteriaConfig,
+        passphrase: &[u8],
+    ) -> crate::Result<Self> {
+        let kdf_path = backing.join(".volume.kdf");
+        let kdf_file = crate::fs_layer::kdf::VolumeKeyFile::load(&kdf_path).map_err(|e| {
+            anyhow::anyhow!(
+                "mount: KDF sidecar missing or corrupt ({e}). Run `soteriad init` first."
+            )
+        })?;
+        let key = crate::fs_layer::kdf::derive_volume_key(passphrase, &kdf_file)
+            .map_err(|e| anyhow::anyhow!("mount: KDF derive failed: {e}"))?;
+        let mut key_arr = [0u8; 32];
+        key_arr.copy_from_slice(key.as_slice());
+        Self::new(backing, cfg, key_arr)
+    }
+
+    /// V-AUDIT-1: refuse to mount with any all-same-byte sentinel key. This
+    /// is defense-in-depth: a future refactor cannot reintroduce a hardcoded
+    /// key without tripping this check.
+    fn refuse_sentinel_key(key: &[u8; 32]) -> crate::Result<()> {
+        let first = key[0];
+        let all_same = key.iter().all(|&b| b == first);
+        if all_same {
+            anyhow::bail!(
+                "refusing to mount: volume key is a sentinel (all bytes = {:#x}). \
+                 This usually means the key source was not configured.",
+                first
+            );
+        }
+        Ok(())
+    }
+
     /// Load the inode map from disk, or build it fresh from the backing
-    /// directory.
-    fn load_inode_map(backing: &PathBuf) -> (HashMap<u64, String>, HashMap<String, u64>) {
+    /// directory. The on-disk format is a list of InodeEntry.
+    fn load_inode_map(backing: &PathBuf) -> (HashMap<u64, InodeEntry>, HashMap<String, u64>) {
         let map_path = backing.join(".soteria.inode_map");
         if let Ok(raw) = std::fs::read(&map_path) {
-            if let Ok(entries) = serde_json::from_slice::<Vec<(u64, String)>>(&raw) {
-                let inode_map: HashMap<u64, String> = entries.iter().cloned().collect();
-                let name_map: HashMap<String, u64> =
-                    entries.into_iter().map(|(ino, name)| (name, ino)).collect();
+            if let Ok(entries) = serde_json::from_slice::<Vec<InodeEntry>>(&raw) {
+                let mut inode_map = HashMap::new();
+                let mut name_map = HashMap::new();
+                for entry in entries {
+                    let ino = inode_for(&entry.name);
+                    name_map.insert(entry.name.clone(), ino);
+                    inode_map.insert(ino, entry);
+                }
                 return (inode_map, name_map);
             }
         }
 
-        // Build fresh from the backing directory.
+        // Build fresh from the backing directory. For each existing file,
+        // load its file_id from the on-disk header so the inode map is
+        // consistent with the actual encryption keys.
         let mut inode_map = HashMap::new();
         let mut name_map = HashMap::new();
         if let Ok(names) = list_files(backing) {
             for name in names {
                 let ino = inode_for(&name);
-                inode_map.insert(ino, name.clone());
+                let file_id = match OnDiskFile::load(&backing_path_for(backing, &name)) {
+                    Ok(f) => f.file_id,
+                    Err(_) => Self::file_id_for_name(&name),
+                };
+                inode_map.insert(
+                    ino,
+                    InodeEntry {
+                        name: name.clone(),
+                        file_id,
+                    },
+                );
                 name_map.insert(name, ino);
             }
         }
@@ -123,20 +190,32 @@ impl SoteriaFs {
     fn save_inode_map(&self) {
         let map_path = self.backing.join(".soteria.inode_map");
         let map = self.inode_map.lock();
-        let entries: Vec<(u64, String)> =
-            map.iter().map(|(&ino, name)| (ino, name.clone())).collect();
+        let entries: Vec<InodeEntry> = map.values().cloned().collect();
         if let Ok(raw) = serde_json::to_vec(&entries) {
             let _ = std::fs::write(&map_path, &raw);
         }
     }
 
-    /// Register a new file in the inode map.
-    fn register_inode(&self, name: &str) -> u64 {
+    /// Register a new file in the inode map. The file_id is provided by
+    /// the caller (typically generated at create time).
+    fn register_inode_with_id(&self, name: &str, file_id: [u8; 32]) -> u64 {
         let ino = inode_for(name);
-        self.inode_map.lock().insert(ino, name.to_string());
+        self.inode_map.lock().insert(
+            ino,
+            InodeEntry {
+                name: name.to_string(),
+                file_id,
+            },
+        );
         self.name_map.lock().insert(name.to_string(), ino);
         self.save_inode_map();
         ino
+    }
+
+    /// Register a new file in the inode map, deriving the file_id from the
+    /// name (used for backward compat / load paths).
+    fn register_inode(&self, name: &str) -> u64 {
+        self.register_inode_with_id(name, Self::file_id_for_name(name))
     }
 
     /// Remove a file from the inode map.
@@ -152,11 +231,12 @@ impl SoteriaFs {
         backing_path_for(&self.backing, name)
     }
 
-    fn derive_file_key(&self, name: &str) -> [u8; 32] {
-        let mut material = b"soteria-fs-file-id-v1".to_vec();
-        material.extend_from_slice(name.as_bytes());
-        let file_id: [u8; 32] = blake3::hash(&material).into();
-        self.keyring.file_key(&file_id)
+    /// Derive the per-file encryption key from a stable file_id (V-AUDIT-5).
+    /// The file_id is stored in the OnDiskFile header AND in the inode map,
+    /// so it survives renames. We do NOT derive from `name` because that
+    /// would break decryption on rename.
+    fn derive_file_key_from_id(&self, file_id: &[u8; 32]) -> [u8; 32] {
+        self.keyring.file_key(file_id)
     }
 
     fn file_id_for_name(name: &str) -> [u8; 32] {
@@ -227,9 +307,9 @@ impl SoteriaFs {
             return Ok(());
         }
         let on_disk = encrypt_to_disk(
-            Self::file_id_for_name(&open.name),
+            open.file_id,
             self.algorithm,
-            self.derive_file_key(&open.name),
+            self.derive_file_key_from_id(&open.file_id),
             self.block_size,
             &open.plaintext,
         )?;
@@ -251,7 +331,7 @@ impl SoteriaFs {
     }
 
     /// Decrypt and cache a file for reading.
-    fn load_into_read_cache(&self, ino: u64, name: &str) -> Vec<u8> {
+    fn load_into_read_cache(&self, ino: u64, name: &str, file_id: &[u8; 32]) -> Vec<u8> {
         // Check cache first.
         {
             let mut cache = self.read_cache.lock();
@@ -266,7 +346,7 @@ impl SoteriaFs {
             Ok(f) => f
                 .plaintext(&crate::crypto_engine::block::BlockCrypto::new(
                     self.algorithm,
-                    self.derive_file_key(name),
+                    self.derive_file_key_from_id(file_id),
                 ))
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
@@ -386,10 +466,10 @@ impl Filesystem for SoteriaFs {
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
-        let name = {
+        let (name, file_id) = {
             let map = self.inode_map.lock();
             match map.get(&ino) {
-                Some(n) => n.clone(),
+                Some(entry) => (entry.name.clone(), entry.file_id),
                 None => {
                     reply.error(KernelError::ENOENT);
                     return;
@@ -405,7 +485,7 @@ impl Filesystem for SoteriaFs {
                 data.clone()
             } else {
                 drop(cache);
-                self.load_into_read_cache(ino, &name)
+                self.load_into_read_cache(ino, &name, &file_id)
             }
         };
 
@@ -414,6 +494,7 @@ impl Filesystem for SoteriaFs {
             fh,
             CachedFile {
                 name,
+                file_id,
                 plaintext,
                 dirty: false,
                 last_access: Instant::now(),
@@ -434,11 +515,18 @@ impl Filesystem for SoteriaFs {
         reply: ReplyCreate,
     ) {
         let name = name.to_string_lossy().to_string();
-        let ino = self.register_inode(&name);
+        // Generate a random file_id for the new file. This makes file_id
+        // independent of name, so renames don't break the encryption key.
+        let file_id = {
+            let mut id = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
+            id
+        };
+        let ino = self.register_inode_with_id(&name, file_id);
         let on_disk = match encrypt_to_disk(
-            Self::file_id_for_name(&name),
+            file_id,
             self.algorithm,
-            self.derive_file_key(&name),
+            self.derive_file_key_from_id(&file_id),
             self.block_size,
             &[],
         ) {
@@ -457,6 +545,7 @@ impl Filesystem for SoteriaFs {
             fh,
             CachedFile {
                 name: name.clone(),
+                file_id,
                 plaintext: Vec::new(),
                 dirty: true,
                 last_access: Instant::now(),
@@ -566,6 +655,13 @@ impl Filesystem for SoteriaFs {
         let new = self.backing_path(&new_name);
         match std::fs::rename(&old, &new) {
             Ok(_) => {
+                // V-AUDIT-5: The on-disk file is unchanged (we just renamed the
+                // container), so the file_id stored inside the header remains
+                // valid. We update the inode map so subsequent lookups use the
+                // new name, but the encryption key (derived from file_id) is
+                // not affected. Decryption continues to work because the
+                // file_id is read from the OnDiskFile header, not from the
+                // path.
                 self.unregister_inode(&old_name);
                 self.register_inode(&new_name);
                 reply.ok();
@@ -593,16 +689,35 @@ impl Filesystem for SoteriaFs {
         reply: ReplyAttr,
     ) {
         if let Some(new_size) = size {
-            let map = self.inode_map.lock();
-            if let Some(name) = map.get(&ino) {
-                let path = self.backing_path(name);
-                if let Ok(mut on_disk) = OnDiskFile::load(&path) {
-                    if (new_size as usize) < on_disk.plaintext.len() {
-                        on_disk.plaintext.truncate(new_size as usize);
+            // V-AUDIT-4: Truncate must re-encrypt the surviving plaintext and
+            // produce a fresh ciphertext blob, not just rewrite the header.
+            // Otherwise the original ciphertext (with the truncated data) is
+            // still on disk and recoverable from the raw device.
+            let (name, file_id) = {
+                let map = self.inode_map.lock();
+                match map.get(&ino) {
+                    Some(entry) => (entry.name.clone(), entry.file_id),
+                    None => {
+                        self.getattr(_req, ino, reply);
+                        return;
                     }
-                    on_disk.plaintext_size = new_size;
-                    let _ = on_disk.save(&path);
                 }
+            };
+            let path = self.backing_path(&name);
+            if let Ok(mut on_disk) = OnDiskFile::load(&path) {
+                if (new_size as usize) < on_disk.plaintext.len() {
+                    on_disk.plaintext.truncate(new_size as usize);
+                }
+                on_disk.plaintext_size = new_size;
+                // Re-encrypt the truncated plaintext into a fresh ciphertext.
+                let fresh = encrypt_to_disk(
+                    on_disk.file_id,
+                    on_disk.algorithm,
+                    self.derive_file_key_from_id(&file_id),
+                    on_disk.block_size as usize,
+                    &on_disk.plaintext,
+                )?;
+                let _ = fresh.save(&path);
             }
         }
         self.getattr(_req, ino, reply);

@@ -9,16 +9,132 @@ description = "Soteria: offline embedded encrypted security runtime"
 name = "soteriad"
 path = "src/main.rs"
 
+[build-dependencies]
+# No deps: build.rs is self-contained (it ships its own SHA-256/HMAC
+# to avoid polluting the dep graph with a `build-dependencies` entry
+# that would be downloaded separately from the regular deps).
+
 [features]
+# =====================================================================
+# Default build = TCB ONLY.
+#
+# `cargo build` with no features compiles the cryptographic core,
+# FDE layer, filesystem, key hierarchy, erasure coding, metadata
+# AEAD, and daemon. All "extras" modules are gated behind
+# opt-in features below. This keeps the trusted computing base
+# (TCB) small and auditable.
+#
+# Use `--features <feature>` to add specific extras modules.
+# Use `--features full` to enable every opt-in module.
+# =====================================================================
 default = []
-fuse = ["dep:fuser"]
-pqc-oqs = [] # reserved for liboqs-backed ML-KEM; pure-Rust ml-kem is the default
-tpm = ["dep:tss-esapi"] # real TPM2 backend via TCG Software Stack
-tui = ["dep:ratatui", "dep:crossterm"] # native terminal UI
+
+# FIPS 140-3 mode: switches crypto primitives to the FIPS-validated
+# `ring` library. When enabled:
+#   - AES-256-XTS sector cipher -> AES-256-GCM (FIPS SP 800-38D)
+#   - Argon2id KDF -> PBKDF2-HMAC-SHA-256 (FIPS SP 800-132, 600k iters)
+#   - BLAKE3 integrity hash -> SHA-256 (FIPS 180-4)
+#   - HKDF-SHA-512 -> HKDF-SHA-256 (FIPS SP 800-56C)
+#   - OsRng -> ring::SystemRandom (FIPS SP 800-90A)
+# Power-on self-tests (KAT) run at startup. The binary refuses to
+# serve FIPS operations if any self-test fails.
+fips = []
+
+# SOTERIA-OMEGA Government & Military Edition. Adds:
+#   - classification & multi-level security (MLS)
+#   - two-person / four-eyes cryptographic release
+#   - software TEMPEST noise generation
+#   - COMSEC key custody chain
+#   - emergency zeroization escalation
+#   - multi-level initialization flow
+#   - operational sovereignty (air-gap mode)
+#   - forked crypto process (capability drop, seccomp-style filter on Linux)
+#   - Merkle + Reed-Solomon integrity
+#   - ransomware defense (entropy monitor, rate limiter, extension whitelist)
+#   - hardware root-of-trust (TPM, FIDO2, PUF) with software fallbacks
+# All OMEGA modules are software-only when the corresponding hardware
+# crate is unavailable; see each module's docs for the threat model
+# and fallback behaviour.
+omega = []
+
+# Defense subsystem: intrusion detection, sensors, response
+# engine, event bus, canaries. Operational detection; not in the
+# cryptographic TCB.
+defense = []
+
+# Deception: decoy content, recursive hell, rate griefing, honey
+# filesystem. Operational-misleading modules; not in the TCB.
+deception = []
+
+# Anti-forensic: header scatter, temporal erase, timestamp warp,
+# entropy padding. These affect the on-disk appearance of data.
+anti-forensic = []
+
+# Advanced / experimental: chameleon, obsidian, mirage_fs. These
+# are research-grade.
+advanced = []
+
+# Read-only AI observer (heuristic, no model weights, no network).
+# Off by default.
+ai-observer = []
+
+# Key management utilities beyond the canonical `key_hierarchy`
+# (lifecycle, ratchet, capability, TPM keyring).
+key-manager = []
+
+# Policy and audit log (revocation lists, audit trail).
+policy = []
+
+# Anomaly detection (sensor fusion, canaries).
+security = []
+
+# Snapshot / copy-on-write engine. Optional; not in the TCB.
+snapshot = []
+
+# Ransomware simulation / red-team tooling. Never enable in
+# production builds.
+simulation = []
+
+# Enterprise / multi-tenant glue.
+enterprise = []
+
+# Native terminal UI (ratatui + crossterm).
+tui = ["dep:ratatui", "dep:crossterm"]
+
+# FUSE filesystem (Linux only). Pulls in `key-manager` because
+# the FUSE fs uses `SessionKeyring` to bind the volume key.
+fuse = ["dep:fuser", "key-manager"]
+
+# Real TPM2 backend (vs. software stub in `fde::tpm_seal`).
+# Real silicon path; software fallback is the default and is
+# always available in `fde::tpm_seal`.
+tpm = ["dep:tss-esapi"]
+
+# Convenience: enable every opt-in feature. Used for the
+# `cargo build --features full` smoke test in CI.
+full = [
+    "omega",
+    "defense",
+    "deception",
+    "anti-forensic",
+    "advanced",
+    "ai-observer",
+    "key-manager",
+    "policy",
+    "security",
+    "snapshot",
+    "simulation",
+    "enterprise",
+    "tui",
+    "fuse",
+    "tpm",
+]
 
 [dependencies]
 anyhow = "1.0"
+aes = "0.8"
 aes-gcm = "0.10"
+ring = "0.17"
 argon2 = "0.5"
 blake3 = "1.5"
 chacha20poly1305 = "0.10"
@@ -41,6 +157,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tempfile = "3.10"
+thiserror = "1.0"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }

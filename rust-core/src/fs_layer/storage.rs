@@ -59,13 +59,21 @@ pub const BACKING_EXT: &str = "sot";
 pub const HEADER_SIZE: usize = 256;
 pub const INDEX_ENTRY_SIZE: usize = 80;
 pub const MAGIC: &[u8; 16] = b"SOTERIA1\0\0\0\0\0\0\0\0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const ALG_XCHACHA: u8 = 1;
 const ALG_AES_GCM: u8 = 2;
 const HEADER_INTEGRITY_OFFSET: usize = 80;
 const HEADER_INTEGRITY_SIZE: usize = 32;
 const KDF_HASH_OFFSET: usize = 112;
 const KDF_HASH_SIZE: usize = 32;
+
+/// Hard cap on the index entry count we accept on load. Caps a maliciously
+/// crafted header at a known-bounded allocation. With 4 KiB blocks, this is
+/// 256 TiB max volume, which is the practical ceiling for any consumer use.
+pub const MAX_BLOCK_COUNT: u32 = 1 << 26; // 64M blocks = 256 TiB @ 4 KiB
+
+/// Hard cap on the WAL payload length we accept on load (see wal.rs).
+pub const MAX_WAL_PAYLOAD: usize = 1 << 30; // 1 GiB
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VolumeError {
@@ -126,14 +134,19 @@ impl OnDiskFile {
         header[56..60].copy_from_slice(&self.block_size.to_le_bytes());
         header[64..72].copy_from_slice(&self.plaintext_size.to_le_bytes());
         header[72..76].copy_from_slice(&(self.index.len() as u32).to_le_bytes());
-        // Header integrity covers everything before the integrity field.
-        let integrity = blake3::hash(&header[..HEADER_INTEGRITY_OFFSET]);
-        header[HEADER_INTEGRITY_OFFSET..HEADER_INTEGRITY_OFFSET + HEADER_INTEGRITY_SIZE]
-            .copy_from_slice(integrity.as_bytes());
-        // PATCH-05: Write KDF sidecar hash to header.
+        // PATCH-05 + V-AUDIT-2: Write KDF sidecar hash to header BEFORE
+        // computing integrity, so the integrity hash covers the KDF_HASH field.
         if let Some(kdf_hash) = &self.kdf_hash {
             header[KDF_HASH_OFFSET..KDF_HASH_OFFSET + KDF_HASH_SIZE].copy_from_slice(kdf_hash);
         }
+        // Header integrity covers everything from offset 0 to the KDF_HASH field
+        // (inclusive). This binds the KDF_HASH to the integrity check, fixing
+        // the bypass where the old layout put integrity in the middle and
+        // covered only bytes 0..80.
+        let integrity_end = KDF_HASH_OFFSET + KDF_HASH_SIZE;
+        let integrity = blake3::hash(&header[..integrity_end]);
+        header[HEADER_INTEGRITY_OFFSET..HEADER_INTEGRITY_OFFSET + HEADER_INTEGRITY_SIZE]
+            .copy_from_slice(integrity.as_bytes());
         buf.extend_from_slice(&header);
         for entry in &self.index {
             buf.extend_from_slice(&entry.block_index.to_le_bytes());
@@ -149,8 +162,8 @@ impl OnDiskFile {
     }
 
     /// Parse a volume from its binary representation. Verifies magic, version,
-    /// and header integrity. Does NOT verify the lineage chain of data blocks;
-    /// use `verify_lineage` for that.
+    /// and header integrity (including the KDF_HASH field). Does NOT verify
+    /// the lineage chain of data blocks; use `verify_lineage` for that.
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         if bytes.len() < HEADER_SIZE {
             anyhow::bail!("volume: input shorter than header");
@@ -171,15 +184,26 @@ impl OnDiskFile {
         file_id.copy_from_slice(&bytes[24..56]);
         let block_size = u32::from_le_bytes(bytes[56..60].try_into().unwrap());
         let plaintext_size = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
-        let block_count = u32::from_le_bytes(bytes[72..76].try_into().unwrap()) as usize;
-        // Verify header integrity.
+        let block_count = u32::from_le_bytes(bytes[72..76].try_into().unwrap());
+        // V-AUDIT-11: Bound block_count before computing index_size to prevent
+        // a maliciously large header causing an OOM allocation.
+        if block_count > MAX_BLOCK_COUNT {
+            anyhow::bail!(
+                "volume: block_count {} exceeds max {}",
+                block_count,
+                MAX_BLOCK_COUNT
+            );
+        }
+        // V-AUDIT-2: Verify header integrity over bytes 0..KDF_HASH_END, so
+        // the KDF_HASH is now bound to the integrity check.
+        let integrity_end = KDF_HASH_OFFSET + KDF_HASH_SIZE;
         let stored =
             &bytes[HEADER_INTEGRITY_OFFSET..HEADER_INTEGRITY_OFFSET + HEADER_INTEGRITY_SIZE];
-        let computed = blake3::hash(&bytes[..HEADER_INTEGRITY_OFFSET]);
+        let computed = blake3::hash(&bytes[..integrity_end]);
         if stored != computed.as_bytes() {
             anyhow::bail!("volume: header integrity check failed");
         }
-        // PATCH-05: Read KDF sidecar hash from header.
+        // Read KDF sidecar hash from header.
         let kdf_hash = {
             let hash_bytes = &bytes[KDF_HASH_OFFSET..KDF_HASH_OFFSET + KDF_HASH_SIZE];
             if hash_bytes.iter().all(|&b| b == 0) {
@@ -191,12 +215,15 @@ impl OnDiskFile {
             }
         };
 
-        let index_size = block_count * INDEX_ENTRY_SIZE;
+        let block_count_us = block_count as usize;
+        let index_size = block_count_us
+            .checked_mul(INDEX_ENTRY_SIZE)
+            .ok_or_else(|| anyhow::anyhow!("volume: index size overflow"))?;
         if bytes.len() < HEADER_SIZE + index_size {
             anyhow::bail!("volume: input shorter than index");
         }
-        let mut index = Vec::with_capacity(block_count);
-        for i in 0..block_count {
+        let mut index = Vec::with_capacity(block_count_us);
+        for i in 0..block_count_us {
             let off = HEADER_SIZE + i * INDEX_ENTRY_SIZE;
             let block_index = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
             let data_offset = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap());
@@ -270,8 +297,14 @@ impl OnDiskFile {
         Ok(())
     }
 
-    /// Decrypt all blocks and return the plaintext.
+    /// Decrypt all blocks and return the plaintext. Verifies the lineage chain
+    /// before returning; if the chain is broken, returns an error pointing to
+    /// the first bad block index. This is V-AUDIT-3.
     pub fn plaintext(&self, crypto: &BlockCrypto) -> crate::Result<Vec<u8>> {
+        // V-AUDIT-3: Refuse to decrypt if the lineage chain is broken.
+        if let Some(bad) = self.verify_lineage() {
+            anyhow::bail!("volume: lineage chain broken at block {bad}");
+        }
         let mut out = Vec::with_capacity(self.plaintext_size as usize);
         for entry in &self.index {
             let start = entry.data_offset as usize;

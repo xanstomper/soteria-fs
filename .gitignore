@@ -1,7 +1,12 @@
 # Rust
 **/target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed for binary crates (reproducible builds).
+# Library-only crates may ignore it.
+
+# Crush / opencode / local tool state
+.crush/
+.crush.json
 
 # Ruby
 ruby/vendor/

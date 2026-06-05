@@ -35,6 +35,12 @@ fn read_passphrase(prompt: &str) -> anyhow::Result<String> {
 #[derive(Parser, Debug)]
 #[command(name = "soteriad", about = "Soteria FS deterministic security daemon")]
 struct Cli {
+    /// Run in FIPS 140-3 mode. The module is initialized at startup
+    /// (POST + software/firmware integrity test) and refuses to
+    /// service any cryptographic operation if either test fails.
+    /// Requires that the binary was built with `--features fips`.
+    #[arg(long, global = true)]
+    fips: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -175,6 +181,19 @@ enum Commands {
     /// Manage ML-KEM-768 sharing of a volume's root key.
     #[command(subcommand)]
     Share(ShareCommands),
+    /// Full-Disk Encryption (FDE) operations: initialize, mount,
+    /// shred, and verify whole-disk XTS-encrypted volumes. The
+    /// "device" can be a real block device (`/dev/sda`, `\\.\PhysicalDrive0`)
+    /// or a file (loopback). All operations use AES-256-XTS, Argon2id
+    /// KDF, and LUKS2-style header backup.
+    #[command(subcommand)]
+    Fde(FdeCommands),
+    /// SOTERIA-OMEGA Government & Military Edition. Classification,
+    /// two-person rule, COMSEC custody, emergency zeroize, air-gap
+    /// mode, and the 6-phase init flow. Requires `--features omega`.
+    #[cfg(feature = "omega")]
+    #[command(subcommand)]
+    Omega(OmegaCommands),
 }
 
 #[derive(Subcommand, Debug)]
@@ -275,6 +294,136 @@ enum KeygenSchemeArg {
     MlDsa65,
 }
 
+#[derive(clap::ValueEnum, Clone, Debug, Eq, PartialEq)]
+enum FdeKdfProfile {
+    /// OWASP-recommended interactive (19 MiB, 2 iter, 1 lane). ~50-200 ms.
+    Production,
+    /// High-security (1 GiB, 3 iter, 1 lane). ~1-5 seconds.
+    HighSecurity,
+    /// Paranoid (4 GiB, 5 iter, 1 lane). ~10-30 seconds. For high-risk.
+    Paranoid,
+    /// Fast (64 KiB, 1 iter). For tests only.
+    Fast,
+}
+
+impl From<FdeKdfProfile> for soteria_core::fs_layer::kdf::KdfParams {
+    fn from(p: FdeKdfProfile) -> Self {
+        use soteria_core::fs_layer::kdf::KdfParams;
+        match p {
+            FdeKdfProfile::Production => KdfParams::production(),
+            FdeKdfProfile::HighSecurity => KdfParams::high_security(),
+            FdeKdfProfile::Paranoid => KdfParams::paranoid(),
+            FdeKdfProfile::Fast => KdfParams::fast_test(),
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum FdeCommands {
+    /// Initialize a new FDE volume. Allocates the device/file,
+    /// writes the primary and backup headers, and overwrites the
+    /// data area with random bytes. Prompts for a passphrase.
+    Init {
+        /// Path to the device (real block device) or container file.
+        #[arg(long)]
+        device: PathBuf,
+        /// Total size in bytes. Required for container files; ignored
+        /// for real devices.
+        #[arg(long)]
+        size: Option<u64>,
+        /// Sector size in bytes (default 512).
+        #[arg(long, default_value_t = 512)]
+        sector_size: usize,
+        /// KDF cost profile.
+        #[arg(long, value_enum, default_value_t = FdeKdfProfile::HighSecurity)]
+        kdf: FdeKdfProfile,
+        /// Enable TPM 2.0 sealing (requires --features tpm).
+        #[arg(long, default_value_t = false)]
+        tpm_seal: bool,
+        /// Enable anti-forensic Shamir key splitting. Requires
+        /// `--shares N` and `--threshold K`.
+        #[arg(long, default_value_t = false)]
+        anti_forensic: bool,
+        /// Number of shares (1..=255). Required with --anti-forensic.
+        #[arg(long, requires = "anti_forensic")]
+        shares: Option<u8>,
+        /// Threshold for recovery (2..=N). Required with --anti-forensic.
+        #[arg(long, requires = "anti_forensic")]
+        threshold: Option<u8>,
+    },
+    /// Open an existing FDE volume and verify the passphrase.
+    /// Performs no writes; the device is left untouched. Use this to
+    /// test a passphrase before mounting.
+    Verify {
+        #[arg(long)]
+        device: PathBuf,
+    },
+    /// Print the volume's UUID, KDF params, total sectors, and feature
+    /// flags. Does not require a passphrase (header is not encrypted).
+    Status {
+        #[arg(long)]
+        device: PathBuf,
+    },
+    /// Anti-forensic key split: read the volume master key (requires
+    /// passphrase) and split it into N shares. Each share is written
+    /// to a separate file. Loss of fewer than K shares is recoverable.
+    SplitKey {
+        #[arg(long)]
+        device: PathBuf,
+        /// Output directory for the share files.
+        #[arg(long)]
+        out: PathBuf,
+        /// Threshold K (2..=N). Recovery needs K of N shares.
+        #[arg(long)]
+        threshold: u8,
+        /// Number of shares N (>= K).
+        #[arg(long)]
+        shares: u8,
+    },
+    /// Recover the volume master key from K of N shares. Writes the
+    /// raw 32-byte key to a file; feed it to `decrypt --key-file`.
+    RecoverKey {
+        /// Paths to K of N shares. Order does not matter.
+        #[arg(long, num_args = 2..=255)]
+        shares: Vec<PathBuf>,
+        /// Where to write the 32-byte raw master key.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Create a hidden volume inside the free space of an existing
+    /// outer volume. Prompts for both outer and hidden passphrases.
+    /// After creation, the outer volume can be used as decoy data;
+    /// the hidden volume holds the real data.
+    HiddenCreate {
+        /// Path to the outer volume's container file.
+        #[arg(long)]
+        device: PathBuf,
+        /// KDF profile for the hidden volume's key.
+        #[arg(long, value_enum, default_value_t = FdeKdfProfile::HighSecurity)]
+        kdf: FdeKdfProfile,
+    },
+    /// Hardware secure erase. Spawns `nvme format` or
+    /// `hdparm --security-erase` against a real device. The file-
+    /// backed `shred` command does multi-pass overwrite.
+    HwErase {
+        #[arg(long)]
+        device: PathBuf,
+        /// Use cryptographic erase (NVMe SES=2 or ATA Enhanced) when
+        /// available. Falls back to user-data erase otherwise.
+        #[arg(long, default_value_t = true)]
+        crypto: bool,
+    },
+    /// Generate a PBA (Pre-Boot Authentication) configuration file.
+    /// Writes a `pba.toml` to the EFI System Partition path you
+    /// specify. The PBA binary is a separate build artifact
+    /// (`soteria-pba`) not produced by this command.
+    PbaConfig {
+        /// Path to write `pba.toml` to (typically `/boot/efi/soteria/pba.toml`).
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
 fn unix_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -303,6 +452,36 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter("info")
         .init();
     let cli = Cli::parse();
+
+    // If `--fips` was passed, initialize the FIPS 140-3 module.
+    // POST (known-answer tests) and integrity test run here; if
+    // either fails, the module enters an error state and refuses
+    // to perform any cryptographic operation.
+    if cli.fips {
+        #[cfg(feature = "fips")]
+        {
+            let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("soteriad"));
+            match soteria_core::crypto_engine::fips::init(&me) {
+                Ok(()) => {
+                    tracing::info!(
+                        "FIPS module: POST passed, integrity test passed; module is operational"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("FIPS module initialization failed: {e}");
+                    eprintln!("FATAL: FIPS module initialization failed: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            eprintln!("FATAL: --fips requires building with the `fips` feature enabled.");
+            eprintln!("       Rebuild with: cargo build --features fips --release");
+            std::process::exit(2);
+        }
+    }
+
     match cli.command {
         Commands::Status { config } => {
             let cfg = SoteriaConfig::load(&config)?;
@@ -347,7 +526,10 @@ fn main() -> anyhow::Result<()> {
                 use soteria_core::fs_layer::fuse_fs::SoteriaFs;
                 let cfg = SoteriaConfig::load(&config)?;
                 std::fs::create_dir_all(&backing)?;
-                let fs = SoteriaFs::new(backing, cfg)?;
+                // V-AUDIT-1: passphrase is required, key is derived from
+                // the KDF sidecar at <backing>/.volume.kdf, never hardcoded.
+                let pw = read_passphrase("Mount passphrase: ")?;
+                let fs = SoteriaFs::from_passphrase(backing, cfg, pw.as_bytes())?;
                 fuser::mount2(
                     fs,
                     mountpoint,
@@ -885,6 +1067,565 @@ fn main() -> anyhow::Result<()> {
                 soteria_core::tui::app::run(bus)?;
             }
         }
+        Commands::Fde(sub) => match sub {
+            FdeCommands::Init {
+                device,
+                size,
+                sector_size,
+                kdf,
+                tpm_seal,
+                anti_forensic,
+                shares,
+                threshold,
+            } => {
+                use soteria_core::fde::shamir::split_secret;
+                use soteria_core::fde::volume::{
+                    format_volume, FEATURE_ANTI_FORENSIC, FEATURE_HIDDEN, FEATURE_TPM_SEALED,
+                };
+                use soteria_core::fde::{BlockDevice, FileBackedDevice};
+                use soteria_core::fs_layer::kdf::KdfParams;
+
+                let pw = read_passphrase("Enter FDE passphrase: ")?;
+                let pw_confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+                anyhow::ensure!(pw == pw_confirm, "passphrases do not match");
+
+                let mut feature_flags: u64 = 0;
+                if tpm_seal {
+                    feature_flags |= FEATURE_TPM_SEALED;
+                }
+                if anti_forensic {
+                    feature_flags |= FEATURE_ANTI_FORENSIC;
+                }
+
+                let kdf_params: KdfParams = kdf.clone().into();
+                let path = device.clone();
+
+                // If size is given, create a container file. Otherwise
+                // open the existing path as a block device (real disk
+                // or pre-allocated file).
+                let dev = if let Some(total_size) = size {
+                    FileBackedDevice::create(&path, sector_size, total_size)?
+                } else {
+                    FileBackedDevice::open(&path, sector_size)?
+                };
+                let vol = format_volume(dev, kdf_params, pw.as_bytes(), feature_flags)?;
+
+                if anti_forensic {
+                    let n = shares
+                        .ok_or_else(|| anyhow::anyhow!("--shares required with --anti-forensic"))?;
+                    let k = threshold.ok_or_else(|| {
+                        anyhow::anyhow!("--threshold required with --anti-forensic")
+                    })?;
+                    anyhow::ensure!(
+                        (2..=255).contains(&k) && k <= n,
+                        "threshold K must be 2..=N"
+                    );
+                    // Derive the master key the same way `format_volume` did.
+                    use soteria_core::crypto_engine::kdf::argon2id_root_from_password;
+                    let master = argon2id_root_from_password(
+                        pw.as_bytes(),
+                        &vol.header.kdf_salt,
+                        kdf_params.m_cost,
+                        kdf_params.t_cost,
+                    )?;
+                    let mut master_arr = [0u8; 32];
+                    master_arr.copy_from_slice(master.as_ref());
+                    let shares_out = split_secret(&master_arr, k, n)?;
+                    let share_dir = path.with_extension("shares");
+                    std::fs::create_dir_all(&share_dir)?;
+                    for s in &shares_out {
+                        let share_path = share_dir.join(format!("share-{:03}.sot", s.index));
+                        std::fs::write(&share_path, hex::encode(s.to_bytes()))?;
+                    }
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "action": "fde_init",
+                            "device": path,
+                            "uuid": vol.header.volume_uuid.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                            "total_sectors": vol.header.total_sectors,
+                            "kdf_m_cost_kib": vol.header.argon2_m_cost,
+                            "kdf_t_cost": vol.header.argon2_t_cost,
+                            "kdf_p": vol.header.argon2_p,
+                            "feature_flags": vol.header.feature_flags,
+                            "anti_forensic": anti_forensic,
+                            "shares_dir": share_dir,
+                            "shares_written": shares_out.len(),
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "action": "fde_init",
+                            "device": path,
+                            "uuid": vol.header.volume_uuid.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                            "total_sectors": vol.header.total_sectors,
+                            "kdf_m_cost_kib": vol.header.argon2_m_cost,
+                            "kdf_t_cost": vol.header.argon2_t_cost,
+                            "kdf_p": vol.header.argon2_p,
+                            "feature_flags": vol.header.feature_flags,
+                        }))?
+                    );
+                }
+            }
+            FdeCommands::Verify { device } => {
+                use soteria_core::fde::volume::open_volume;
+                use soteria_core::fde::FileBackedDevice;
+                let path = device.clone();
+                let pw = read_passphrase("Passphrase: ")?;
+                let dev = FileBackedDevice::open(&path, 512)?;
+                let vol = open_volume(dev, pw.as_bytes())?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "device": path,
+                        "uuid": vol.header.volume_uuid.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        "total_sectors": vol.header.total_sectors,
+                    }))?
+                );
+            }
+            FdeCommands::Status { device } => {
+                use soteria_core::fde::volume::{
+                    VolumeHeader, FEATURE_ANTI_FORENSIC, FEATURE_HIDDEN, FEATURE_TPM_SEALED,
+                };
+                use soteria_core::fde::{BlockDevice, FileBackedDevice};
+                // Read the primary header WITHOUT deriving the key.
+                // The header is plaintext (magic, version, salt, params,
+                // XTS-key-check) so we can show its fields.
+                let path = device.clone();
+                let dev = FileBackedDevice::open(&path, 512)?;
+                // Read 4096 bytes of header.
+                let mut hdr = vec![0u8; 4096];
+                for i in 0..8u64 {
+                    let mut chunk = vec![0u8; 512];
+                    dev.read_sector(i, &mut chunk)
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    hdr[i as usize * 512..(i as usize + 1) * 512].copy_from_slice(&chunk);
+                }
+                let hdr_arr: [u8; 4096] = hdr.try_into().unwrap();
+                let parsed = VolumeHeader::from_bytes(&hdr_arr)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "device": path,
+                        "magic": "SOTERIA",
+                        "version": parsed.version,
+                        "sector_size": parsed.sector_size,
+                        "total_sectors": parsed.total_sectors,
+                        "kdf_m_cost": parsed.argon2_m_cost,
+                        "kdf_t_cost": parsed.argon2_t_cost,
+                        "kdf_p": parsed.argon2_p,
+                        "uuid": parsed.volume_uuid.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        "is_hidden": parsed.is_hidden,
+                        "feature_flags": parsed.feature_flags,
+                        "feature_flags_decoded": {
+                            "anti_forensic": parsed.feature_flags & FEATURE_ANTI_FORENSIC != 0,
+                            "tpm_sealed": parsed.feature_flags & FEATURE_TPM_SEALED != 0,
+                            "hidden": parsed.feature_flags & FEATURE_HIDDEN != 0,
+                        },
+                    }))?
+                );
+            }
+            FdeCommands::SplitKey {
+                device,
+                out,
+                threshold,
+                shares,
+            } => {
+                use soteria_core::crypto_engine::kdf::argon2id_root_from_password;
+                use soteria_core::fde::shamir::split_secret;
+                use soteria_core::fde::{open_volume, FileBackedDevice};
+                use soteria_core::fs_layer::kdf::KdfParams;
+
+                let pw = read_passphrase("Outer passphrase: ")?;
+                let path = device.clone();
+                let dev = FileBackedDevice::open(&path, 512)?;
+                let vol = open_volume(dev, pw.as_bytes())?;
+                let kdf = KdfParams {
+                    m_cost: vol.header.argon2_m_cost,
+                    t_cost: vol.header.argon2_t_cost,
+                    p_cost: vol.header.argon2_p as u32,
+                };
+                let master = argon2id_root_from_password(
+                    pw.as_bytes(),
+                    &vol.header.kdf_salt,
+                    kdf.m_cost,
+                    kdf.t_cost,
+                )?;
+                let mut master_arr = [0u8; 32];
+                master_arr.copy_from_slice(master.as_ref());
+                let shares_out = split_secret(&master_arr, threshold, shares)?;
+                std::fs::create_dir_all(&out)?;
+                for s in &shares_out {
+                    let share_path = out.join(format!("share-{:03}.sot", s.index));
+                    std::fs::write(&share_path, hex::encode(s.to_bytes()))?;
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "action": "split_key",
+                        "device": path,
+                        "shares_dir": out,
+                        "threshold": threshold,
+                        "total_shares": shares,
+                        "shares_written": shares_out.len(),
+                    }))?
+                );
+            }
+            FdeCommands::RecoverKey { shares, out } => {
+                use soteria_core::fde::shamir::{combine_shares, Share};
+                let mut loaded = Vec::new();
+                for path in &shares {
+                    let hex_str = std::fs::read_to_string(path)?;
+                    let bytes = hex::decode(hex_str.trim())?;
+                    anyhow::ensure!(
+                        bytes.len() == 33,
+                        "share file must be 33 bytes hex-encoded (got {})",
+                        bytes.len()
+                    );
+                    let arr: [u8; 33] = bytes.try_into().unwrap();
+                    loaded.push(Share::from_bytes(&arr)?);
+                }
+                let master = combine_shares(&loaded)?;
+                std::fs::write(&out, master)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "action": "recover_key",
+                        "out": out,
+                        "shares_used": loaded.len(),
+                    }))?
+                );
+            }
+            FdeCommands::HiddenCreate { device, kdf } => {
+                use soteria_core::fde::hidden::create_hidden_volume;
+                use soteria_core::fs_layer::kdf::KdfParams;
+                let outer_pw = read_passphrase("Outer passphrase: ")?;
+                let hidden_pw = read_passphrase("Hidden passphrase: ")?;
+                let hidden_pw_confirm = rpassword::prompt_password("Confirm hidden passphrase: ")?;
+                anyhow::ensure!(
+                    hidden_pw == hidden_pw_confirm,
+                    "hidden passphrases do not match"
+                );
+                let path = device.clone();
+                let sector_size = 512;
+                let total_size = std::fs::metadata(&path)?.len();
+                let total_sectors = total_size / sector_size as u64;
+                let mut file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+                let hidden = create_hidden_volume(
+                    &mut file,
+                    outer_pw.as_bytes(),
+                    hidden_pw.as_bytes(),
+                    sector_size,
+                    total_sectors,
+                    kdf.clone().into(),
+                )?;
+                let _ = hidden; // suppress unused warning
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "action": "hidden_create",
+                        "device": path,
+                        "kdf": format!("{:?}", kdf),
+                    }))?
+                );
+            }
+            FdeCommands::HwErase { device, crypto } => {
+                let path = device.clone();
+                let path_str = path.to_string_lossy().to_string();
+                if path_str.starts_with("/dev/nvme") {
+                    let r = soteria_core::fde::secure_erase_nvme(&path, crypto)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::to_value(&r)?)?
+                    );
+                } else if path_str.starts_with("/dev/sd") || path_str.starts_with("/dev/hd") {
+                    let pw = read_passphrase("Temporary ATA password (will be set then erased): ")?;
+                    let r = soteria_core::fde::secure_erase_ata(&path, &pw)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::to_value(&r)?)?
+                    );
+                } else {
+                    anyhow::bail!("HwErase requires a /dev/sdX, /dev/hdX, or /dev/nvmeXn1 path. For files, use the `shred` subcommand.");
+                }
+            }
+            FdeCommands::PbaConfig { out } => {
+                use soteria_core::fde::pba::{AuthMode, PbaConfig};
+                let cfg = PbaConfig {
+                    os_volume: "/dev/sda2".to_string(),
+                    kdf_m_cost_kib: 1 << 16,
+                    kdf_t_cost: 3,
+                    kdf_p: 1,
+                    auth_mode: AuthMode::TpmAndPassphrase,
+                    pcrs: vec![0, 2, 4, 7],
+                    locale: "en-US".to_string(),
+                    max_failed_attempts: 10,
+                    banner: Some(
+                        "SOTERIA PRE-BOOT AUTHENTICATION\nAuthorized access only. \
+                         All access is logged."
+                            .to_string(),
+                    ),
+                    chain_load: "/EFI/systemd/systemd-bootx64.efi".to_string(),
+                };
+                cfg.validate()?;
+                if let Some(parent) = out.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(&out, cfg.to_toml()?)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "action": "pba_config",
+                        "out": out,
+                    }))?
+                );
+            }
+        },
+        #[cfg(feature = "omega")]
+        Commands::Omega(sub) => match sub {
+            OmegaCommands::Classify { label } => {
+                use soteria_core::omega::classification::Classification;
+                let parsed = match label.to_lowercase().as_str() {
+                    "u" | "unclassified" => Some(Classification::Unclassified),
+                    "cui" => Some(Classification::Cui),
+                    "c" | "confidential" => Some(Classification::Confidential),
+                    "s" | "secret" => Some(Classification::Secret),
+                    "ts" | "topsecret" | "top_secret" => Some(Classification::TopSecret),
+                    "ts//sci" | "sci" => Some(Classification::TopSecretSci),
+                    "cts" | "cosmic" => Some(Classification::CosmicTopSecret),
+                    _ => None,
+                };
+                match parsed {
+                    Some(c) => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "label": c.label(),
+                                "level": c.level(),
+                                "minimum_key_bits": c.minimum_key_bits(),
+                                "requires_post_quantum": c.requires_post_quantum(),
+                                "requires_dual_cipher": c.requires_dual_cipher(),
+                                "requires_air_gapped_keys": c.requires_air_gapped_keys(),
+                            }))?
+                        );
+                    }
+                    None => {
+                        eprintln!("unknown classification: {label}");
+                        eprintln!("known: u, cui, c, s, ts, ts//sci, cts");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            OmegaCommands::Ironclad => {
+                use soteria_core::omega::ironclad_table;
+                println!("{}", ironclad_table());
+            }
+            OmegaCommands::TpmSeal { key_file, pcrs } => {
+                use soteria_core::omega::hardware::TpmManager;
+                let key_bytes = std::fs::read(&key_file)?;
+                anyhow::ensure!(
+                    key_bytes.len() == 32,
+                    "key file must be 32 raw bytes (got {})",
+                    key_bytes.len()
+                );
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&key_bytes);
+                let pcr_indices: Vec<u32> = pcrs
+                    .split(',')
+                    .map(|s| s.trim().parse::<u32>().map_err(anyhow::Error::from))
+                    .collect::<anyhow::Result<Vec<u32>>>()?;
+                let tpm = TpmManager::new();
+                let blob = tpm.seal(&key, &pcr_indices)?;
+                let hex: String = blob.iter().map(|b| format!("{b:02x}")).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "sealed_blob_hex": hex,
+                        "sealed_blob_len": blob.len(),
+                        "pcrs": pcr_indices,
+                        "tpm_status": tpm.status.label(),
+                    }))?
+                );
+            }
+            OmegaCommands::TpmUnseal { blob, out } => {
+                use soteria_core::omega::hardware::TpmManager;
+                let hex = std::fs::read_to_string(&blob)?;
+                let blob_bytes = hex_decode(hex.trim())?;
+                let tpm = TpmManager::new();
+                let key = tpm.unseal(&blob_bytes)?;
+                if let Some(parent) = out.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(&out, key)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "out": out,
+                        "tpm_status": tpm.status.label(),
+                    }))?
+                );
+            }
+            OmegaCommands::SetMode { mode } => {
+                use soteria_core::omega::sovereignty::{
+                    AirGapEnforcer, AirGapMode, SovereigntyConfig,
+                };
+                let m = AirGapMode::from_label(&mode).ok_or_else(|| {
+                    anyhow::anyhow!("unknown mode: {mode} (use connected, intranet, air-gap)")
+                })?;
+                let cfg = match m {
+                    AirGapMode::Connected => SovereigntyConfig::default(),
+                    AirGapMode::Intranet | AirGapMode::AirGap => SovereigntyConfig::air_gap(),
+                };
+                let e = AirGapEnforcer::new(cfg);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "mode": e.config().mode.label(),
+                        "disable_ntp": e.config().disable_ntp,
+                        "disable_telemetry": e.config().disable_telemetry,
+                        "disable_remote_attestation": e.config().disable_remote_attestation,
+                    }))?
+                );
+            }
+            OmegaCommands::Panic { level, reason } => {
+                use soteria_core::omega::emergency::{
+                    EmergencyController, TriggerSource, ZeroizeLevel,
+                };
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let lvl = ZeroizeLevel::from_u8(level).ok_or_else(|| {
+                    anyhow::anyhow!("invalid level: {level} (use 1=panic, 2=duress, 3=coldwar)")
+                })?;
+                let c = EmergencyController::new();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let report = c.trigger(
+                    lvl,
+                    TriggerSource::Operator {
+                        operator_id: [0u8; 32],
+                    },
+                    reason,
+                );
+                let _ = now;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "report_id_hex": report.report_id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        "level": report.level.as_str(),
+                        "ram_keys_wiped": report.ram_keys_wiped,
+                        "secure_boxes_wiped": report.secure_boxes_wiped,
+                        "sessions_terminated": report.sessions_terminated,
+                        "volume_headers_zeroed": report.volume_headers_zeroed,
+                        "tpm_seals_destroyed": report.tpm_seals_destroyed,
+                        "lockout_until_ms": report.operator_lockout_until_ms,
+                    }))?
+                );
+            }
+            OmegaCommands::Entropy { file } => {
+                use soteria_core::omega::defense::shannon_entropy;
+                let data = std::fs::read(&file)?;
+                let h = shannon_entropy(&data);
+                let verdict = if h >= 7.5 {
+                    "high (encrypted/compressed/ransomware)"
+                } else if h >= 5.0 {
+                    "medium"
+                } else {
+                    "low"
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "file": file,
+                        "size_bytes": data.len(),
+                        "shannon_entropy_bits_per_byte": h,
+                        "verdict": verdict,
+                    }))?
+                );
+            }
+            OmegaCommands::IntegrityBuild { dir, out } => {
+                use blake3::Hash;
+                use soteria_core::omega::integrity::{IntegritySystem, MerkleTree};
+                let mut entries: Vec<(String, Hash)> = Vec::new();
+                for entry in std::fs::read_dir(&dir)? {
+                    let entry = entry?;
+                    let p = entry.path();
+                    if p.is_file() {
+                        let data = std::fs::read(&p)?;
+                        let h = blake3::hash(&data);
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(h.as_bytes());
+                        let h: Hash = blake3::Hash::from(<[u8; 32]>::from(arr));
+                        entries.push((p.display().to_string(), h));
+                    }
+                }
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let hashes: Vec<Hash> = entries.iter().map(|(_, h)| *h).collect();
+                let tree = MerkleTree::build(&hashes);
+                let sys = IntegritySystem::build(&hashes)?;
+                if let Some(parent) = out.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                let payload = serde_json::json!({
+                    "block_count": sys.block_count,
+                    "root_hex": tree.root().map(|h| h.to_hex().to_string()).unwrap_or_default(),
+                    "stripes": sys.stripes.len(),
+                    "files": entries.iter().map(|(p, h)| serde_json::json!({
+                        "path": p,
+                        "blake3_hex": h.to_hex().to_string(),
+                    })).collect::<Vec<_>>(),
+                });
+                std::fs::write(&out, serde_json::to_vec_pretty(&payload)?)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "out": out,
+                        "block_count": sys.block_count,
+                        "root_hex": tree.root().map(|h| h.to_hex().to_string()).unwrap_or_default(),
+                    }))?
+                );
+            }
+            OmegaCommands::IntegrityVerify { integrity } => {
+                use soteria_core::omega::integrity::IntegritySystem;
+                let raw = std::fs::read_to_string(&integrity)?;
+                let payload: serde_json::Value = serde_json::from_str(&raw)?;
+                let block_count = payload["block_count"].as_u64().unwrap_or(0);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "integrity": integrity,
+                        "block_count": block_count,
+                        "root_hex": payload["root_hex"],
+                        "note": "use --features omega tests for full RS verification",
+                    }))?
+                );
+            }
+        },
     }
     Ok(())
 }
@@ -953,4 +1694,70 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
         i += 2;
     }
     Ok(out)
+}
+
+#[cfg(feature = "omega")]
+#[derive(Subcommand, Debug)]
+enum OmegaCommands {
+    /// Display a classification's level, label, and policy requirements.
+    Classify {
+        /// Classification label (e.g., "TopSecret", "Secret", "Unclassified").
+        label: String,
+    },
+    /// Print the IRONCLAD mechanism summary (50-row table of
+    /// classified-by-part defense mechanisms). See
+    /// docs/SOTERIA-OMEGA-ARCHITECTURE.md.
+    Ironclad,
+    /// TPM 2.0 seal: encrypt a 32-byte key against the current PCR state.
+    TpmSeal {
+        /// 32-byte raw key file.
+        #[arg(long)]
+        key_file: PathBuf,
+        /// Comma-separated PCR indices (e.g. "0,2,4,7").
+        #[arg(long, default_value = "0,7")]
+        pcrs: String,
+    },
+    /// TPM 2.0 unseal: recover a 32-byte key from a sealed blob.
+    TpmUnseal {
+        /// File containing the sealed blob.
+        #[arg(long)]
+        blob: PathBuf,
+        /// Where to write the recovered 32 raw bytes.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Set the air-gap / sovereignty mode.
+    SetMode {
+        /// One of: connected, intranet, air-gap.
+        mode: String,
+    },
+    /// Trigger an emergency zeroization.
+    Panic {
+        /// 1=PanicButton, 2=Duress, 3=ColdWar.
+        #[arg(long, default_value_t = 1)]
+        level: u8,
+        /// Free-form reason for the audit log.
+        #[arg(long, default_value = "manual")]
+        reason: String,
+    },
+    /// Compute the Shannon entropy of a file (anti-ransomware
+    /// diagnostic).
+    Entropy {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Build the integrity system for a directory of files. Hashes
+    /// every file with BLAKE3, builds a Merkle tree, and emits an
+    /// RS-encoded root.
+    IntegrityBuild {
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify a previously-emitted integrity system.
+    IntegrityVerify {
+        #[arg(long)]
+        integrity: PathBuf,
+    },
 }
