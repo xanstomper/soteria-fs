@@ -55,3 +55,5 @@ Thumbs.db
 packaging/windows/package/
 packaging/linux/rpm/
 packaging/macos/Soteria.app/
+packaging/output/
+packaging/portable/SoteriaAegis-Portable/

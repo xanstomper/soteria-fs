@@ -1,6 +1,8 @@
 pub mod durability;
 #[cfg(feature = "fuse")]
 pub mod fuse_fs;
+#[cfg(feature = "fuse")]
+pub mod fuse_hardening;
 pub mod kdf;
 pub mod metadata;
 pub mod region;

@@ -4,12 +4,14 @@ use soteria_core::crypto_engine::dsa::{self, OwnerPublicKey, OwnerSecretKey};
 use soteria_core::crypto_engine::pq::{generate_keypair, PublicKey, SecretKey};
 use soteria_core::crypto_engine::shares::{shares_path_for, ShareFile};
 use soteria_core::crypto_engine::AeadAlgorithm;
+#[cfg(feature = "defense")]
 use soteria_core::event_bus::{EventBus, Severity, SoteriaEvent};
 use soteria_core::fs_layer::kdf::{KdfParams, VolumeKeyFile};
 use soteria_core::fs_layer::storage::{
     backing_path_for, decrypt_from_disk_with_key, decrypt_from_disk_with_passphrase,
     encrypt_to_disk_with_passphrase, list_files, OnDiskFile,
 };
+#[cfg(feature = "defense")]
 use soteria_core::response_engine::{PolicyEngine, ResponseContext};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -178,6 +180,17 @@ enum Commands {
     /// TUI that communicates directly with the Soteria runtime.
     /// No HTTP, no browser, no external process.
     Tui,
+    /// TPM 2.0 operations: probe, seal, unseal, and read boot
+    /// measurements. Uses real TPM2 silicon when the `tpm`
+    /// feature is enabled and a TPM2 device is present; falls
+    /// back to a software provider (device-derived key) otherwise.
+    /// The fallback is documented and *not* equivalent to TPM
+    /// hardware binding. Requires `--features tpm` for the
+    /// real-silicon path; otherwise only the software probe is
+    /// available.
+    #[cfg(feature = "tpm")]
+    #[command(subcommand)]
+    Tpm(TpmCommands),
     /// Manage ML-KEM-768 sharing of a volume's root key.
     #[command(subcommand)]
     Share(ShareCommands),
@@ -316,6 +329,41 @@ impl From<FdeKdfProfile> for soteria_core::fs_layer::kdf::KdfParams {
             FdeKdfProfile::Fast => KdfParams::fast_test(),
         }
     }
+}
+
+/// TPM 2.0 subcommands. Requires `--features tpm` for the
+/// real-silicon path; otherwise only the software probe is
+/// available.
+#[cfg(feature = "tpm")]
+#[derive(Subcommand, Debug)]
+enum TpmCommands {
+    /// Detect whether TPM2 hardware is present and report the
+    /// active provider (real silicon or software fallback).
+    Probe,
+    /// Seal a 32-byte key against the current TPM2 PCR state.
+    /// Writes the sealed blob to `--out` as raw bytes.
+    Seal {
+        /// File containing the 32-byte raw key to seal.
+        #[arg(long)]
+        key_file: PathBuf,
+        /// Output file for the sealed blob.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Unseal a previously-sealed blob. Writes the recovered
+    /// 32-byte key to `--out`.
+    Unseal {
+        /// File containing the sealed blob (raw bytes).
+        #[arg(long)]
+        blob: PathBuf,
+        /// Output file for the recovered 32-byte key.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Read PCR 0,1,4,7 and print the BLAKE3 boot-measurement
+    /// hash. The same hash is used as part of the FDE volume
+    /// unseal check (PCR-bound).
+    BootMeasurement,
 }
 
 #[derive(Subcommand, Debug)]
@@ -493,22 +541,32 @@ fn main() -> anyhow::Result<()> {
             severity,
         } => {
             let cfg = SoteriaConfig::load(&config)?;
-            let mut bus = EventBus::new();
-            let mut policy = PolicyEngine::from_config(&cfg.response);
-            let event = SoteriaEvent::new(
-                event_type,
-                "cli_simulator",
-                Severity::new(severity),
-                serde_json::json!({"deterministic": true}),
-            )?;
-            let record = bus.append(event.clone())?;
-            let decision = policy.evaluate(&event, &mut ResponseContext::default());
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"event_record": *record, "decision": decision})
-                )?
-            );
+            #[cfg(feature = "defense")]
+            {
+                let mut bus = EventBus::new();
+                let mut policy = PolicyEngine::from_config(&cfg.response);
+                let event = SoteriaEvent::new(
+                    event_type,
+                    "cli_simulator",
+                    Severity::new(severity),
+                    serde_json::json!({"deterministic": true}),
+                )?;
+                let record = bus.append(event.clone())?;
+                let decision = policy.evaluate(&event, &mut ResponseContext::default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"event_record": *record, "decision": decision})
+                    )?
+                );
+            }
+            #[cfg(not(feature = "defense"))]
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({"skipped": true, "reason": "defense feature not enabled"})
+                );
+            }
         }
         Commands::Mount {
             mountpoint,
@@ -851,67 +909,77 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Audit { log, verify_only } => {
-            use soteria_core::policy::audit_log::{read_entries, verify_bytes, VerifyResult};
-            let raw = match std::fs::read(&log) {
-                Ok(b) => b,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "ok": true,
-                            "entries": 0,
-                            "log": log,
-                            "note": "log does not exist yet",
-                        }))?
-                    );
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-            let verify = verify_bytes(&raw).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            match &verify {
-                VerifyResult::Ok { entries } => {
-                    if verify_only {
+            #[cfg(feature = "policy")]
+            {
+                use soteria_core::policy::audit_log::{read_entries, verify_bytes, VerifyResult};
+                let raw = match std::fs::read(&log) {
+                    Ok(b) => b,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
                                 "ok": true,
-                                "entries": entries,
+                                "entries": 0,
+                                "log": log,
+                                "note": "log does not exist yet",
                             }))?
                         );
-                    } else {
-                        let entries = read_entries(&log)?;
-                        println!(
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                let verify = verify_bytes(&raw).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                match &verify {
+                    VerifyResult::Ok { entries } => {
+                        if verify_only {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "ok": true,
+                                    "entries": entries,
+                                }))?
+                            );
+                        } else {
+                            let entries = read_entries(&log)?;
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "ok": true,
+                                    "entries": entries,
+                                }))?
+                            );
+                        }
+                    }
+                    VerifyResult::Tampered { first_bad_index } => {
+                        eprintln!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
-                                "ok": true,
-                                "entries": entries,
+                                "ok": false,
+                                "reason": "tampered",
+                                "first_bad_index": first_bad_index,
                             }))?
                         );
+                        std::process::exit(1);
+                    }
+                    VerifyResult::Malformed { first_bad_index } => {
+                        eprintln!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": false,
+                                "reason": "malformed",
+                                "first_bad_index": first_bad_index,
+                            }))?
+                        );
+                        std::process::exit(2);
                     }
                 }
-                VerifyResult::Tampered { first_bad_index } => {
-                    eprintln!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "ok": false,
-                            "reason": "tampered",
-                            "first_bad_index": first_bad_index,
-                        }))?
-                    );
-                    std::process::exit(1);
-                }
-                VerifyResult::Malformed { first_bad_index } => {
-                    eprintln!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "ok": false,
-                            "reason": "malformed",
-                            "first_bad_index": first_bad_index,
-                        }))?
-                    );
-                    std::process::exit(2);
-                }
+            }
+            #[cfg(not(feature = "policy"))]
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({"error": "audit command requires --features policy"})
+                );
             }
         }
         Commands::Share(sub) => match sub {
@@ -1049,6 +1117,58 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         },
+        #[cfg(feature = "tpm")]
+        Commands::Tpm(sub) => {
+            use crate::tpm::{create_provider, tpm_available};
+            match sub {
+                TpmCommands::Probe => {
+                    let available = tpm_available();
+                    let active = if available && cfg!(feature = "tpm") {
+                        "tss-esapi"
+                    } else if available {
+                        "silicon-detected-but-feature-disabled"
+                    } else {
+                        "software-fallback"
+                    };
+                    let result = serde_json::json!({
+                        "tpm2_detected": available,
+                        "active_provider": active,
+                        "feature_tpm_built": cfg!(feature = "tpm"),
+                        "note": "software fallback is NOT equivalent to TPM hardware binding",
+                    });
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                }
+                TpmCommands::Seal { key_file, out } => {
+                    let key =
+                        std::fs::read(key_file).map_err(|e| anyhow::anyhow!("read key: {e}"))?;
+                    anyhow::ensure!(
+                        key.len() == 32,
+                        "key file: expected 32 bytes, got {}",
+                        key.len()
+                    );
+                    let mut key_arr = [0u8; 32];
+                    key_arr.copy_from_slice(&key);
+                    let provider = create_provider()?;
+                    let blob = provider.seal(&key_arr)?;
+                    std::fs::write(out, &blob).map_err(|e| anyhow::anyhow!("write blob: {e}"))?;
+                    println!("sealed {} bytes -> {}", blob.len(), out.display());
+                }
+                TpmCommands::Unseal { blob, out } => {
+                    let blob_bytes =
+                        std::fs::read(blob).map_err(|e| anyhow::anyhow!("read blob: {e}"))?;
+                    let provider = create_provider()?;
+                    let key = provider.unseal(&blob_bytes)?;
+                    std::fs::write(out, key.as_ref())
+                        .map_err(|e| anyhow::anyhow!("write key: {e}"))?;
+                    println!("unsealed 32 bytes -> {}", out.display());
+                }
+                TpmCommands::BootMeasurement => {
+                    let provider = create_provider()?;
+                    let m = provider.boot_measurement()?;
+                    println!("boot-measurement (BLAKE3): {}", hex::encode(m));
+                }
+            }
+        }
         Commands::Tui => {
             #[cfg(not(feature = "tui"))]
             {
@@ -1056,15 +1176,22 @@ fn main() -> anyhow::Result<()> {
             }
             #[cfg(feature = "tui")]
             {
-                let bus = std::sync::Arc::new(soteria_core::event_bus::bus::EventBus::new());
-                bus.publish(
-                    soteria_core::event_bus::bus::EventCategory::System,
-                    soteria_core::event_bus::bus::Severity::Info,
-                    "soteriad",
-                    "Soteria runtime started",
-                    soteria_core::event_bus::bus::EventData::None,
-                );
-                soteria_core::tui::app::run(bus)?;
+                #[cfg(feature = "defense")]
+                {
+                    let bus = std::sync::Arc::new(soteria_core::event_bus::bus::EventBus::new());
+                    bus.publish(
+                        soteria_core::event_bus::bus::EventCategory::System,
+                        soteria_core::event_bus::bus::Severity::Info,
+                        "soteriad",
+                        "Soteria runtime started",
+                        soteria_core::event_bus::bus::EventData::None,
+                    );
+                    soteria_core::tui::app::run(bus)?;
+                }
+                #[cfg(not(feature = "defense"))]
+                {
+                    anyhow::bail!("TUI requires the `defense` feature (provides event bus)");
+                }
             }
         }
         Commands::Fde(sub) => match sub {

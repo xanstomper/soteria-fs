@@ -1,14 +1,11 @@
 name: Soteria CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   lint:
     name: Lint
@@ -27,6 +24,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
         working-directory: rust-core
+      - name: Clippy desktop
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: desktop
 
   test:
     name: Test (${{ matrix.os }})
@@ -40,8 +40,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-core -> target
-      - name: Run tests
+      - name: TCB tests
         run: cargo test --all-targets
+        working-directory: rust-core
+      - name: Full-feature tests
+        run: cargo test --all-targets --features full
         working-directory: rust-core
 
   security:
@@ -68,14 +71,51 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-core -> target
-      - name: Build release
+      - name: Build TCB
         run: cargo build --release
         working-directory: rust-core
-      - name: Upload binary
+      - name: Build with FIPS
+        run: cargo build --release --features fips
+        working-directory: rust-core
+      - name: Build with OMEGA
+        run: cargo build --release --features omega
+        working-directory: rust-core
+      - name: Upload TCB binary
         uses: actions/upload-artifact@v4
         with:
-          name: soteriad-${{ matrix.os }}
+          name: soteriad-tcb-${{ matrix.os }}
           path: rust-core/target/release/soteriad*
+      - name: Build desktop GUI (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release
+        working-directory: desktop
+      - name: Upload desktop GUI
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoteriaAegis-${{ matrix.os }}
+          path: desktop/target/release/SoteriaAegis.exe
+      - name: Build portable ZIP (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging/portable/pack.ps1 -Config Release
+        shell: pwsh
+      - name: Upload portable ZIP
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoteriaAegis-Portable-${{ matrix.os }}
+          path: packaging/output/SoteriaAegis-Portable.zip
+      - name: Build installer (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release
+        working-directory: installer
+      - name: Upload installer
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoteriaAegis-Setup-${{ matrix.os }}
+          path: installer/target/release/SoteriaAegis-Setup.exe
 
   release:
     name: Release
@@ -88,11 +128,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Download artifacts
         uses: actions/download-artifact@v4
-      - name: Create release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             soteriad-ubuntu-latest/soteriad
             soteriad-windows-latest/soteriad.exe
             soteriad-macos-latest/soteriad
+            SoteriaAegis-windows-latest/SoteriaAegis.exe
+            SoteriaAegis-Portable-windows-latest/SoteriaAegis-Portable.zip
+            SoteriaAegis-Setup-windows-latest/SoteriaAegis-Setup.exe
           generate_release_notes: true

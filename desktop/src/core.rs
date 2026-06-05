@@ -9,8 +9,10 @@ use soteria_core::fs_layer::kdf::{KdfParams, VolumeKeyFile};
 use soteria_core::fs_layer::storage::{
     self, backing_path_for, encrypt_to_disk_with_passphrase, list_files, OnDiskFile,
 };
-use soteria_core::tpm;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "tpm")]
+use soteria_core::tpm;
 
 /// Result of a core operation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -270,7 +272,14 @@ pub fn list_volumes(dir: &Path) -> Vec<(String, u64)> {
 
 /// Check if TPM is available.
 pub fn tpm_available() -> bool {
-    tpm::tpm_available()
+    #[cfg(feature = "tpm")]
+    {
+        tpm::tpm_available()
+    }
+    #[cfg(not(feature = "tpm"))]
+    {
+        false
+    }
 }
 
 /// Get the KDF params (production vs fast).
